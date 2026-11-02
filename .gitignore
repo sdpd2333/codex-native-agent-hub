@@ -1,0 +1,44 @@
+# Credentials, local settings, sessions, and backups
+.env
+.env.*
+!.env.example
+.state/
+**/key.dpapi
+*.dpapi
+**/settings.json
+jobs/
+sessions/
+worktrees/
+runtime/
+*.jsonl
+runtime.json
+panel.json
+**/job.json
+*.log
+*.bak
+*.pem
+*.key
+*.p12
+*.pfx
+*.sqlite*
+
+# Python runtimes, bytecode, and test/build outputs
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

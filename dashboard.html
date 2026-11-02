@@ -1,0 +1,1494 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Native Agent Hub</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7f9;
+        --surface: #fff;
+        --ink: #172533;
+        --muted: #6e7a88;
+        --line: #e3e8ed;
+        --accent: #087f6c;
+        --tint: #eaf7f2;
+        --danger: #b43c40;
+        --shadow: 0 3px 14px #17253306;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          14px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "Microsoft YaHei",
+          sans-serif;
+      }
+      button,
+      input,
+      textarea,
+      select {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: wait;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      textarea:focus-visible,
+      select:focus-visible {
+        outline: 3px solid #4aaca955;
+        outline-offset: 2px;
+      }
+      header {
+        padding: 22px 24px 0;
+        background: var(--surface);
+        border-bottom: 1px solid var(--line);
+      }
+      .heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .brand {
+        font-size: 19px;
+        font-weight: 750;
+        letter-spacing: -0.5px;
+      }
+      .eyebrow {
+        font-size: 10px;
+        letter-spacing: 1.6px;
+        color: var(--accent);
+        font-weight: 700;
+        margin-bottom: 3px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .connection {
+        border: 1px solid var(--line);
+        background: var(--bg);
+        border-radius: 20px;
+        padding: 5px 10px;
+        white-space: nowrap;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .connection.ready {
+        color: var(--accent);
+        background: var(--tint);
+        border-color: #cce8dd;
+      }
+      nav {
+        display: flex;
+        gap: 22px;
+        margin-top: 19px;
+      }
+      nav button {
+        background: none;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        padding: 10px 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      nav button[aria-selected="true"] {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+        font-weight: 650;
+      }
+      .count {
+        font-size: 10px;
+        padding: 1px 5px;
+        margin-left: 4px;
+        border-radius: 6px;
+        background: var(--tint);
+        color: var(--accent);
+      }
+      main {
+        max-width: 1300px;
+        margin: auto;
+        padding: 18px 24px 32px;
+      }
+      [hidden] {
+        display: none !important;
+      }
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      .toolbar input {
+        min-width: 80px;
+        flex: 1;
+        max-width: 340px;
+      }
+      .sync {
+        font-size: 11px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        background: var(--accent);
+        border-radius: 50%;
+        margin-right: 5px;
+      }
+      .dot.error {
+        background: var(--danger);
+      }
+      .btn {
+        border: 1px solid var(--line);
+        background: #fff;
+        border-radius: 7px;
+        padding: 7px 12px;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 550;
+      }
+      .btn:hover {
+        border-color: #aec2bd;
+      }
+      .btn.primary {
+        background: var(--accent);
+        color: #fff;
+        border-color: var(--accent);
+      }
+      .btn.danger {
+        color: var(--danger);
+      }
+      .btn.small {
+        padding: 4px 8px;
+        font-size: 11px;
+      }
+      .monitor {
+        display: grid;
+        grid-template-columns: 260px minmax(0, 1fr);
+        gap: 18px;
+        align-items: start;
+      }
+      .jobs {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+      .job {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 14px;
+        text-align: left;
+        background: var(--surface);
+        color: var(--ink);
+        box-shadow: var(--shadow);
+      }
+      .job.selected {
+        border-color: var(--accent);
+        box-shadow: inset 3px 0 var(--accent);
+      }
+      .job-title {
+        font-size: 13px;
+        font-weight: 650;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .job-meta {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 8px;
+        overflow-wrap: anywhere;
+      }
+      .job-footer {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-top: 12px;
+        gap: 8px;
+      }
+      .badge {
+        display: inline-block;
+        border-radius: 5px;
+        padding: 2px 7px;
+        font-size: 10px;
+        font-weight: 600;
+        background: #eef1f4;
+        color: #657180;
+      }
+      .badge.running {
+        background: #e8f3ff;
+        color: #2a6dba;
+      }
+      .badge.completed {
+        background: var(--tint);
+        color: var(--accent);
+      }
+      .badge.failed,
+      .badge.timed_out {
+        background: #fff0f0;
+        color: var(--danger);
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 21px;
+        margin-bottom: 14px;
+        box-shadow: var(--shadow);
+        min-width: 0;
+      }
+      .card h2 {
+        font-size: 17px;
+        line-height: 1.5;
+        margin: 0 0 10px;
+        overflow-wrap: anywhere;
+      }
+      .card h3 {
+        margin: 0 0 14px;
+        font-size: 13px;
+      }
+      .detail-top {
+        display: flex;
+        gap: 10px;
+        align-items: start;
+        justify-content: space-between;
+      }
+      .detail-meta {
+        font-size: 11px;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 19px;
+      }
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 11px;
+      }
+      .metric .value {
+        font-size: 16px;
+        font-weight: 650;
+        margin-top: 2px;
+      }
+      .metric .label {
+        font-size: 10px;
+        color: var(--muted);
+      }
+      .phase {
+        font-size: 12px;
+        color: var(--accent);
+        margin-top: 13px;
+      }
+      .events {
+        padding: 0;
+        margin: 0;
+        list-style: none;
+      }
+      .events li {
+        display: flex;
+        gap: 16px;
+        padding: 7px 0;
+        border-bottom: 1px solid #f1f3f5;
+        font-size: 12px;
+      }
+      .events time {
+        color: var(--muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .events li:last-child {
+        border: 0;
+      }
+      .empty {
+        text-align: center;
+        border: 1px dashed var(--line);
+        border-radius: 12px;
+        color: var(--muted);
+        padding: 40px 18px;
+        font-size: 12px;
+      }
+      .empty strong {
+        display: block;
+        font-size: 14px;
+        color: var(--ink);
+        margin-bottom: 7px;
+      }
+      .form {
+        max-width: 700px;
+        margin: 6px auto;
+      }
+      .form h1 {
+        font-size: 22px;
+        letter-spacing: -0.6px;
+        margin: 0 0 6px;
+      }
+      .intro {
+        color: var(--muted);
+        font-size: 12px;
+        margin: 0 0 22px;
+      }
+      .field {
+        margin-bottom: 18px;
+      }
+      label {
+        font-size: 12px;
+        font-weight: 600;
+        display: block;
+        margin-bottom: 6px;
+      }
+      input,
+      textarea,
+      select {
+        border: 1px solid #dce2e8;
+        border-radius: 7px;
+        background: #fff;
+        color: var(--ink);
+        padding: 9px 11px;
+        width: 100%;
+        font-size: 12px;
+      }
+      textarea {
+        resize: vertical;
+        min-height: 145px;
+        line-height: 1.7;
+      }
+      input::placeholder,
+      textarea::placeholder {
+        color: #9aa3ad;
+      }
+      .hint {
+        font-size: 11px;
+        color: var(--muted);
+        margin: 6px 0 0;
+        overflow-wrap: anywhere;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .row > * {
+        min-width: 0;
+      }
+      .row input {
+        flex: 1;
+      }
+      .row .btn {
+        white-space: nowrap;
+      }
+      .columns {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+      }
+      .choices {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      .choice {
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 12px;
+        cursor: pointer;
+        font-weight: 500;
+        margin: 0;
+      }
+      .choice:has(input:checked) {
+        background: var(--tint);
+        border-color: var(--accent);
+      }
+      .choice input {
+        width: auto;
+        accent-color: var(--accent);
+        margin-right: 5px;
+      }
+      .choice small {
+        display: block;
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+        margin: 4px 0 0 21px;
+      }
+      .alert {
+        border-radius: 8px;
+        padding: 11px 13px;
+        margin: 12px 0 16px;
+        background: #edf4fc;
+        color: #38648d;
+        font-size: 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .alert.error {
+        background: #fff0f0;
+        color: var(--danger);
+      }
+      .alert.success {
+        background: var(--tint);
+        color: var(--accent);
+      }
+      .provider-strip {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin: 0 0 22px;
+      }
+      .provider {
+        border: 1px solid var(--line);
+        background: var(--surface);
+        text-align: left;
+        border-radius: 8px;
+        padding: 10px;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .provider small {
+        display: block;
+        font-size: 10px;
+        color: var(--muted);
+        font-weight: 400;
+        margin-top: 3px;
+      }
+      .provider[aria-pressed="true"] {
+        border-color: var(--accent);
+        background: var(--tint);
+      }
+      .models {
+        max-height: 200px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 4px;
+        margin-top: 7px;
+      }
+      .models button {
+        display: block;
+        text-align: left;
+        width: 100%;
+        border: 0;
+        background: none;
+        padding: 7px;
+        border-radius: 4px;
+        font:
+          11px/1.5 Consolas,
+          monospace;
+        color: var(--ink);
+        overflow-wrap: anywhere;
+      }
+      .models button:hover,
+      .models button.selected {
+        background: var(--tint);
+        color: var(--accent);
+      }
+      pre {
+        margin: 0;
+        font:
+          11px/1.75 Consolas,
+          "Microsoft YaHei",
+          monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        max-height: 500px;
+        overflow: auto;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fafbfd;
+      }
+      .section-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 14px;
+      }
+      .section-row h3 {
+        margin: 0;
+      }
+      .workspace {
+        font:
+          11px/1.8 Consolas,
+          "Microsoft YaHei",
+          monospace;
+        overflow-wrap: anywhere;
+      }
+      .footer {
+        font-size: 10px;
+        color: #8a949f;
+        text-align: center;
+        padding: 10px 0;
+      }
+      .runtime {
+        font-size: 11px;
+        color: var(--muted);
+        border-top: 1px solid var(--line);
+        padding-top: 14px;
+        margin-top: 20px;
+      }
+      .loading {
+        opacity: 0.7;
+      }
+      @media (max-width: 760px) {
+        header {
+          padding: 18px 16px 0;
+        }
+        main {
+          padding: 16px;
+        }
+        .monitor {
+          grid-template-columns: 1fr;
+        }
+        .jobs {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          max-height: 280px;
+          overflow: auto;
+        }
+        .job {
+          padding: 11px;
+        }
+        .job-meta {
+          font-size: 10px;
+        }
+        .card {
+          padding: 16px;
+        }
+        .brand {
+          font-size: 17px;
+        }
+        .toolbar {
+          flex-wrap: wrap;
+        }
+        .sync {
+          margin-left: auto;
+        }
+        .form {
+          margin: 0 auto;
+        }
+        .metrics {
+          gap: 7px;
+        }
+        .metric {
+          padding: 9px;
+        }
+        .metric .value {
+          font-size: 14px;
+        }
+        .provider {
+          padding: 9px 7px;
+        }
+        .provider small {
+          font-size: 9px;
+        }
+      }
+      @media (max-width: 400px) {
+        .heading {
+          align-items: start;
+          flex-wrap: wrap;
+        }
+        .connection {
+          font-size: 10px;
+        }
+        .columns {
+          grid-template-columns: 1fr;
+          gap: 0;
+        }
+        .choices {
+          gap: 7px;
+        }
+        .choice {
+          font-size: 11px;
+          padding: 10px;
+        }
+        .metrics {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .metric .value {
+          font-size: 12px;
+        }
+        nav {
+          gap: 20px;
+          margin-top: 10px;
+        }
+        .row {
+          flex-wrap: wrap;
+        }
+        .row input {
+          flex-basis: 150px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="heading">
+        <div>
+          <div class="eyebrow">CODEX · NATIVE RUNTIMES</div>
+          <div class="brand">Native Agent Hub</div>
+        </div>
+        <button class="connection" id="connection" type="button">
+          检查连接…
+        </button>
+      </div>
+      <nav role="tablist" aria-label="工作区">
+        <button
+          type="button"
+          id="tab-monitor"
+          role="tab"
+          aria-selected="true"
+          aria-controls="monitor"
+        >
+          任务进展 <span class="count" id="running-count">0</span></button
+        ><button
+          type="button"
+          id="tab-task"
+          role="tab"
+          aria-selected="false"
+          aria-controls="task"
+        >
+          新建任务</button
+        ><button
+          type="button"
+          id="tab-settings"
+          role="tab"
+          aria-selected="false"
+          aria-controls="settings"
+        >
+          连接设置
+        </button>
+      </nav>
+    </header>
+    <main>
+      <section id="monitor" role="tabpanel" aria-labelledby="tab-monitor">
+        <div class="toolbar">
+          <input
+            type="search"
+            id="search"
+            placeholder="搜索任务、代理或模型"
+            aria-label="搜索任务"
+          /><span class="sync" id="sync"><span class="dot"></span>正在连接</span
+          ><button class="btn small" id="refresh" type="button">刷新</button
+          ><button class="btn small" id="pause" type="button">暂停</button>
+        </div>
+        <div class="monitor">
+          <div class="jobs" id="jobs" aria-label="任务列表"></div>
+          <div id="detail" aria-live="polite">
+            <div class="empty">
+              <strong>在这里查看代理的任务进展</strong
+              >选择任务以查看阶段、工具活动和执行结果。
+            </div>
+          </div>
+        </div>
+      </section>
+      <section id="task" role="tabpanel" aria-labelledby="tab-task" hidden>
+        <form class="form" id="task-form" autocomplete="off">
+          <h1>交给擅长的代理</h1>
+          <p class="intro">
+            选择原生运行环境，指定项目和目标。任务启动后可随时查看进展。
+          </p>
+          <div class="card">
+            <div class="field">
+              <label for="task-backend">执行代理</label
+              ><select id="task-backend">
+                <option value="gemini">Gemini · Antigravity</option>
+                <option value="claude">Claude · Claude Code</option>
+                <option value="deepseek">DeepSeek · dsh</option>
+              </select>
+              <p class="hint" id="task-profile"></p>
+            </div>
+            <div class="field">
+              <label for="task-model">本次模型</label
+              ><input
+                id="task-model"
+                list="task-models"
+                placeholder="留空使用该代理已保存的模型"
+              /><datalist id="task-models"></datalist>
+              <p class="hint">
+                填写中转站返回的完整模型 ID。可在连接设置中拉取列表。
+              </p>
+            </div>
+            <div class="field">
+              <label for="task-project">项目目录</label
+              ><input
+                id="task-project"
+                required
+                placeholder="例如 C:\Projects\my-app"
+              />
+              <p class="hint">使用本机现有目录的绝对路径。</p>
+            </div>
+            <div class="field">
+              <label>任务权限</label>
+              <div class="choices">
+                <label class="choice"
+                  ><input
+                    type="radio"
+                    name="mode"
+                    value="review"
+                    checked
+                  />只读审查<small>读取项目，分析并提出建议</small></label
+                ><label class="choice"
+                  ><input type="radio" name="mode" value="edit" />编辑执行<small
+                    >修改文件并运行所需命令</small
+                  ></label
+                >
+              </div>
+            </div>
+            <div class="field" id="workspace-field" hidden>
+              <label for="task-workspace">编辑工作区</label
+              ><select id="task-workspace">
+                <option value="worktree">独立 Git worktree（默认）</option>
+                <option value="direct">直接编辑项目目录</option>
+              </select>
+              <p class="hint">
+                独立 worktree 从 HEAD
+                创建，需要干净且已有提交的仓库。修改保留在单独目录，供你检查与合并。
+              </p>
+            </div>
+            <div class="field">
+              <label for="task-prompt">任务目标</label
+              ><textarea
+                id="task-prompt"
+                required
+                maxlength="100000"
+                placeholder="描述要解决的问题、允许修改的范围，以及完成时需要验证的行为。"
+              ></textarea>
+            </div>
+            <div class="field">
+              <label for="task-timeout">最长运行时间（秒）</label
+              ><input
+                id="task-timeout"
+                type="number"
+                value="600"
+                min="10"
+                max="1800"
+                step="1"
+                required
+              />
+            </div>
+            <div class="alert" id="task-alert" role="status" hidden></div>
+            <button class="btn primary" type="submit" id="submit">
+              启动任务
+            </button>
+          </div>
+        </form>
+      </section>
+      <section
+        id="settings"
+        role="tabpanel"
+        aria-labelledby="tab-settings"
+        hidden
+      >
+        <div class="form">
+          <h1>连接你的模型</h1>
+          <p class="intro">
+            三套配置独立保存。API Key 仅在本机输入，不会回显到聊天或任务列表。
+          </p>
+          <div class="provider-strip" id="providers">
+            <button
+              class="provider"
+              data-backend="gemini"
+              aria-pressed="true"
+              type="button"
+            >
+              Gemini<small>Antigravity</small></button
+            ><button
+              class="provider"
+              data-backend="claude"
+              aria-pressed="false"
+              type="button"
+            >
+              Claude<small>Claude Code</small></button
+            ><button
+              class="provider"
+              data-backend="deepseek"
+              aria-pressed="false"
+              type="button"
+            >
+              DeepSeek<small>Harness / dsh</small>
+            </button>
+          </div>
+          <div class="card">
+            <div class="field">
+              <label for="base-url">Base URL</label
+              ><input
+                id="base-url"
+                type="url"
+                placeholder="https://relay.example.com"
+                autocomplete="off"
+              />
+              <p class="hint" id="protocol"></p>
+            </div>
+            <div class="field">
+              <label for="api-key"
+                >API Key <span class="sub" id="key-status"></span></label
+              ><input
+                id="api-key"
+                type="password"
+                placeholder="已保存时留空；切换地址请重新填写"
+                autocomplete="new-password"
+              />
+              <p class="hint">
+                Windows 使用当前账户的 DPAPI
+                加密保存。环境变量配置优先于本地密钥。
+              </p>
+            </div>
+            <div class="field">
+              <label for="model">模型 ID</label>
+              <div class="row">
+                <input
+                  id="model"
+                  placeholder="从列表选择或填写完整 ID"
+                /><button class="btn" id="fetch-models" type="button">
+                  拉取模型
+                </button>
+              </div>
+              <div id="model-browser" hidden>
+                <input
+                  type="search"
+                  id="model-search"
+                  placeholder="筛选模型 ID"
+                  aria-label="筛选模型"
+                  style="margin-top: 9px"
+                />
+                <div class="models" id="models"></div>
+                <p class="hint" id="model-count"></p>
+              </div>
+            </div>
+            <div class="field" id="effort-field" hidden>
+              <label for="effort">推理强度</label
+              ><select id="effort"></select>
+              <p class="hint">
+                可用强度取决于模型与中转站；默认使用原生运行环境的设置。
+              </p>
+            </div>
+            <div class="alert" id="settings-alert" role="status" hidden></div>
+            <div class="row">
+              <button class="btn" id="test" type="button">测试基础生成</button
+              ><button class="btn primary" id="save" type="button">
+                保存此代理配置
+              </button>
+            </div>
+            <p class="hint">
+              测试会发送一条简短请求并使用接口额度。之后可提交只读任务，验证流式响应和原生工具调用。
+            </p>
+            <div class="runtime" id="runtime"></div>
+          </div>
+        </div>
+      </section>
+      <div class="footer">
+        Native tools. Separate workspaces. One place to follow.
+      </div>
+    </main>
+    <script>
+      (() => {
+        "use strict";
+        const $ = (id) => document.getElementById(id);
+        const names = {
+          gemini: "Gemini",
+          claude: "Claude",
+          deepseek: "DeepSeek",
+        };
+        const statuses = {
+          running: "运行中",
+          completed: "已完成",
+          failed: "失败",
+          timed_out: "超时",
+          cancelled: "已取消",
+          interrupted: "已中断",
+        };
+        const protocols = {
+          gemini:
+            "需要 Gemini 原生接口 /v1beta/models/*，以及流式响应与工具调用。",
+          claude:
+            "需要 Anthropic Messages /v1/messages，以及流式响应与 Claude Code 工具调用。",
+          deepseek:
+            "此版本 dsh 使用 DeepSeek Messages /v1/messages。仅支持 Chat Completions 的中转路径无法运行。",
+        };
+        let config = { profiles: {}, runtimes: {} },
+          backend = "gemini",
+          jobs = [],
+          selected = null;
+        let busy = false,
+          fetching = false,
+          paused = false,
+          timer = null,
+          fingerprint = "",
+          activeTab = "monitor";
+        const modelLists = {},
+          changeCache = new Map();
+        function el(tag, cls, text) {
+          const n = document.createElement(tag);
+          if (cls) n.className = cls;
+          if (text !== undefined) n.textContent = String(text);
+          return n;
+        }
+        function alert(id, text, type = "") {
+          const n = $(id);
+          n.textContent = text;
+          n.className = "alert " + type;
+          n.hidden = !text;
+        }
+        function tab(id) {
+          activeTab = id;
+          for (const t of ["monitor", "task", "settings"]) {
+            $(t).hidden = t !== id;
+            $("tab-" + t).setAttribute("aria-selected", String(t === id));
+          }
+          if (id === "monitor") render();
+        }
+        for (const t of ["monitor", "task", "settings"])
+          $("tab-" + t).onclick = () => tab(t);
+        $("connection").onclick = () => tab("settings");
+        function duration(job) {
+          const start = Date.parse(job.started_at),
+            end = job.finished_at ? Date.parse(job.finished_at) : Date.now();
+          if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
+          const s = Math.max(0, Math.floor((end - start) / 1000));
+          return s >= 60 ? `${Math.floor(s / 60)}分 ${s % 60}秒` : `${s}秒`;
+        }
+        function stamp(s) {
+          const d = new Date(s);
+          return s && !isNaN(d)
+            ? d.toLocaleTimeString("zh-CN", { hour12: false })
+            : "—";
+        }
+        async function request(action, payload) {
+          const r = await fetch(new URL("api/" + action, location.href), {
+            cache: "no-store",
+            ...(payload === undefined
+              ? {}
+              : {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Agent-Hub": "1",
+                  },
+                  body: JSON.stringify(payload),
+                }),
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || `请求失败 (${r.status})`);
+          return data;
+        }
+        function updateSummary() {
+          const ready = Object.values(config.profiles).filter(
+            (p) => p.ready,
+          ).length;
+          $("connection").textContent = `${ready} / 3 已配置`;
+          $("connection").className = "connection" + (ready ? " ready" : "");
+          taskProfile();
+        }
+        function taskProfile() {
+          const b = $("task-backend").value,
+            p = config.profiles[b] || {};
+          $("task-profile").textContent = p.ready
+            ? `已配置 · ${p.runtime} · 默认模型 ${p.model}`
+            : `${names[b]} 尚未配置，请先打开连接设置。`;
+          $("task-model").placeholder = p.model || "留空使用已保存的模型";
+          $("task-models").replaceChildren(
+            ...(modelLists[b] || []).map((m) => {
+              const o = el("option");
+              o.value = m;
+              return o;
+            }),
+          );
+        }
+        function settingsForm() {
+          const p = config.profiles[backend] || {};
+          for (const b of document.querySelectorAll("[data-backend]"))
+            b.setAttribute(
+              "aria-pressed",
+              String(b.dataset.backend === backend),
+            );
+          $("base-url").value = p.base_url || "";
+          $("model").value = p.model || "";
+          $("api-key").value = "";
+          $("protocol").textContent = protocols[backend];
+          $("key-status").textContent =
+            p.key_source === "environment"
+              ? "· 来自环境变量"
+              : p.key_configured
+                ? "· 已加密保存"
+                : "· 尚未配置";
+          const strengths =
+            backend === "claude"
+              ? ["", "low", "medium", "high", "xhigh", "max"]
+              : backend === "deepseek"
+                ? ["", "high", "max"]
+                : [""];
+          $("effort-field").hidden = backend === "gemini";
+          $("effort").replaceChildren(
+            ...strengths.map((v) => {
+              const n = el("option", "", v || "默认");
+              n.value = v;
+              return n;
+            }),
+          );
+          $("effort").value = p.effort || "";
+          const rt = config.runtimes[backend] || {};
+          $("runtime").textContent =
+            `${p.runtime || names[backend]} · ${rt.installed ? "SDK " + rt.version + " 已安装" : "SDK 尚未安装，请运行 install.ps1"}`;
+          $("model-browser").hidden = !modelLists[backend];
+          $("model-search").value = "";
+          renderModels();
+          alert("settings-alert", "");
+        }
+        for (const b of document.querySelectorAll("[data-backend]"))
+          b.onclick = () => {
+            if (busy) return;
+            backend = b.dataset.backend;
+            settingsForm();
+          };
+        function settingsBusy(value) {
+          busy = value;
+          for (const n of document.querySelectorAll(
+            "#settings input,#settings select,#settings button",
+          ))
+            n.disabled = value;
+        }
+        function settingsPayload() {
+          return {
+            backend,
+            base_url: $("base-url").value.trim(),
+            key: $("api-key").value,
+            model: $("model").value.trim(),
+            effort: $("effort").value,
+          };
+        }
+        function renderModels() {
+          const list = modelLists[backend] || [],
+            q = $("model-search").value.toLowerCase();
+          $("models").replaceChildren();
+          let count = 0;
+          for (const m of list) {
+            if (q && !m.toLowerCase().includes(q)) continue;
+            count++;
+            const b = el("button", m === $("model").value ? "selected" : "", m);
+            b.type = "button";
+            b.onclick = () => {
+              $("model").value = m;
+              renderModels();
+            };
+            $("models").append(b);
+          }
+          $("model-count").textContent =
+            `显示 ${count} / ${list.length} 个模型；ID 按接口原样保留。`;
+        }
+        $("model-search").oninput = renderModels;
+        $("model").oninput = renderModels;
+        async function settingAction(action) {
+          if (busy) return;
+          const payload = settingsPayload();
+          settingsBusy(true);
+          alert(
+            "settings-alert",
+            action === "models"
+              ? "正在拉取模型…"
+              : action === "test"
+                ? "正在测试基础生成…"
+                : "正在保存配置…",
+          );
+          try {
+            const data = await request(action, payload);
+            if (action === "models") {
+              modelLists[backend] = Array.isArray(data.models)
+                ? data.models
+                : [];
+              $("model-browser").hidden = false;
+              renderModels();
+              taskProfile();
+              alert(
+                "settings-alert",
+                `已获取 ${data.total_count} 个模型。选择后保存。`,
+                "success",
+              );
+            } else if (action === "test") {
+              alert(
+                "settings-alert",
+                `基础生成通过：${data.reply}\n${data.note}`,
+                "success",
+              );
+            } else {
+              config = data;
+              settingsForm();
+              updateSummary();
+              alert(
+                "settings-alert",
+                "配置已保存。新任务将使用此配置。",
+                "success",
+              );
+            }
+          } catch (e) {
+            alert("settings-alert", e.message, "error");
+          } finally {
+            settingsBusy(false);
+          }
+        }
+        $("fetch-models").onclick = () => settingAction("models");
+        $("test").onclick = () => settingAction("test");
+        $("save").onclick = () => settingAction("config");
+        $("task-backend").onchange = () => {
+          $("task-model").value = "";
+          taskProfile();
+          alert("task-alert", "");
+        };
+        for (const radio of document.querySelectorAll("[name=mode]"))
+          radio.onchange = () => {
+            $("workspace-field").hidden =
+              document.querySelector("[name=mode]:checked").value !== "edit";
+          };
+        $("task-form").onsubmit = async (e) => {
+          e.preventDefault();
+          const b = $("task-backend").value;
+          if (!config.profiles[b]?.ready) {
+            alert(
+              "task-alert",
+              "请先在连接设置中保存此代理的地址、Key 和模型。",
+              "error",
+            );
+            return;
+          }
+          $("submit").disabled = true;
+          alert("task-alert", "正在提交任务…");
+          try {
+            const data = await request("tasks", {
+              backend: b,
+              project_dir: $("task-project").value.trim(),
+              task: $("task-prompt").value,
+              model: $("task-model").value.trim(),
+              mode: document.querySelector("[name=mode]:checked").value,
+              workspace_mode: $("task-workspace").value,
+              timeout_seconds: Number($("task-timeout").value),
+            });
+            selected = data.job_id;
+            alert("task-alert", "");
+            tab("monitor");
+            await poll(true);
+          } catch (e) {
+            alert("task-alert", e.message, "error");
+          } finally {
+            $("submit").disabled = false;
+          }
+        };
+        function badge(status) {
+          return el("span", "badge " + status, statuses[status] || status);
+        }
+        function renderList() {
+          const q = $("search").value.toLowerCase(),
+            list = jobs.filter((j) =>
+              [j.title, j.job_id, j.model, j.backend].some((v) =>
+                String(v || "")
+                  .toLowerCase()
+                  .includes(q),
+              ),
+            );
+          $("jobs").replaceChildren();
+          if (!list.length) {
+            const n = el("div", "empty");
+            n.append(
+              el("strong", "", "还没有任务"),
+              el("span", "", "从「新建任务」开始一次委派。"),
+            );
+            $("jobs").append(n);
+            return;
+          }
+          for (const j of list) {
+            const b = el(
+              "button",
+              "job" + (j.job_id === selected ? " selected" : ""),
+            );
+            b.type = "button";
+            b.append(
+              el("div", "job-title", j.title || "未命名任务"),
+              el(
+                "div",
+                "job-meta",
+                `${names[j.backend] || j.backend} · ${j.model}`,
+              ),
+            );
+            const footer = el("div", "job-footer");
+            const t = el("span", "sub", duration(j));
+            t.dataset.duration = j.job_id;
+            footer.append(badge(j.status), t);
+            b.append(footer);
+            b.onclick = () => {
+              selected = j.job_id;
+              render();
+            };
+            $("jobs").append(b);
+          }
+        }
+        function metric(label, value) {
+          const n = el("div", "metric");
+          n.append(el("div", "label", label), el("div", "value", value));
+          return n;
+        }
+        function renderDetail() {
+          const j = jobs.find((j) => j.job_id === selected);
+          if (!j) return;
+          $("detail").replaceChildren();
+          const p = j.progress || {},
+            top = el("div", "card"),
+            head = el("div", "detail-top");
+          head.append(el("h2", "", j.title || "任务详情"), badge(j.status));
+          top.append(
+            head,
+            el(
+              "div",
+              "detail-meta",
+              `${j.runtime || names[j.backend]} · ${j.model} · ${j.mode === "edit" ? "编辑执行" : "只读审查"}`,
+            ),
+            el("div", "detail-meta", j.job_id),
+          );
+          const metrics = el("div", "metrics"),
+            time = metric("运行时长", duration(j));
+          time.querySelector(".value").dataset.duration = j.job_id;
+          metrics.append(
+            time,
+            metric(
+              "模型调用",
+              `${p.model_calls || 0} / ${p.budget_model_calls || 40}`,
+            ),
+            metric("工具调用", p.tool_calls || 0),
+          );
+          top.append(
+            metrics,
+            el("div", "phase", p.phase || "正在启动运行环境"),
+          );
+          if (j.status === "running" && j.can_cancel) {
+            const cancel = el("button", "btn danger small", "终止任务");
+            cancel.style.marginTop = "14px";
+            cancel.type = "button";
+            cancel.onclick = async () => {
+              cancel.disabled = true;
+              try {
+                await request("cancel", { job_id: j.job_id });
+                await poll(true);
+              } catch (e) {
+                alert("monitor-alert", e.message, "error");
+                cancel.disabled = false;
+              }
+            };
+            top.append(cancel);
+          }
+          const msg = el("div", "alert error");
+          msg.id = "monitor-alert";
+          msg.hidden = true;
+          top.append(msg);
+          $("detail").append(top);
+          if (j.error) {
+            const error = el("div", "alert error", j.error);
+            $("detail").append(error);
+          }
+          if (j.workspace) {
+            const w = j.workspace,
+              card = el("div", "card"),
+              row = el("div", "section-row");
+            row.append(
+              el(
+                "h3",
+                "",
+                w.strategy === "worktree" ? "独立工作区" : "项目工作区",
+              ),
+            );
+            if (j.mode === "edit") {
+              const show = el(
+                "button",
+                "btn small",
+                changeCache.has(j.job_id) ? "刷新变更" : "查看变更",
+              );
+              show.type = "button";
+              show.onclick = async () => {
+                show.disabled = true;
+                try {
+                  changeCache.set(
+                    j.job_id,
+                    await request("changes", { job_id: j.job_id }),
+                  );
+                  renderDetail();
+                } catch (e) {
+                  changeCache.set(j.job_id, { error: e.message });
+                  renderDetail();
+                }
+              };
+              row.append(show);
+            }
+            card.append(row, el("div", "workspace", w.path));
+            if (w.branch) card.append(el("div", "hint", `分支 ${w.branch}`));
+            if (j.mode === "edit")
+              card.append(
+                el(
+                  "p",
+                  "hint",
+                  "修改保留在此目录。检查差异后，再将需要的更改合并到项目。",
+                ),
+              );
+            const changes = changeCache.get(j.job_id);
+            if (changes) {
+              if (changes.error)
+                card.append(el("div", "alert error", changes.error));
+              else {
+                card.append(
+                  el("pre", "", changes.diff || "没有已跟踪文件的差异。"),
+                );
+                if (changes.diff_truncated)
+                  card.append(
+                    el("p", "hint", "差异已截断，请在工作区查看完整内容。"),
+                  );
+                if (changes.untracked_files?.length)
+                  card.append(
+                    el(
+                      "p",
+                      "hint",
+                      "新增文件：\n" + changes.untracked_files.join("\n"),
+                    ),
+                  );
+              }
+            }
+            $("detail").append(card);
+          }
+          const activity = el("div", "card");
+          activity.append(el("h3", "", "最近活动"));
+          const list = el("ol", "events");
+          for (const event of p.events || []) {
+            const li = el("li");
+            li.append(
+              el("time", "", stamp(event.timestamp)),
+              el("span", "", event.label),
+            );
+            list.append(li);
+          }
+          activity.append(list);
+          if (!list.childNodes.length)
+            activity.append(
+              el("p", "hint", "运行环境启动后，这里会显示工具活动。"),
+            );
+          $("detail").append(activity);
+          if (j.result) {
+            const card = el("div", "card"),
+              row = el("div", "section-row"),
+              copy = el("button", "btn small", "复制结果");
+            copy.type = "button";
+            copy.onclick = async () => {
+              try {
+                await navigator.clipboard.writeText(j.result);
+                copy.textContent = "已复制";
+              } catch {
+                copy.textContent = "请手动选择文本";
+              }
+            };
+            row.append(el("h3", "", "执行结果"), copy);
+            card.append(row, el("pre", "result", j.result));
+            if (j.result_truncated)
+              card.append(
+                el(
+                  "p",
+                  "hint",
+                  "结果已截断，可通过 MCP get_job 分页读取完整文本。",
+                ),
+              );
+            $("detail").append(card);
+          }
+        }
+        function render() {
+          renderList();
+          renderDetail();
+        }
+        $("search").oninput = renderList;
+        function sync(text, error = false) {
+          $("sync").replaceChildren(
+            el("span", "dot" + (error ? " error" : "")),
+            document.createTextNode(text),
+          );
+        }
+        async function poll(force = false) {
+          clearTimeout(timer);
+          if (fetching || (paused && !force)) return;
+          fetching = true;
+          try {
+            const data = await request("jobs");
+            const mark = JSON.stringify(data.jobs);
+            jobs = Array.isArray(data.jobs) ? data.jobs : [];
+            if (!selected && jobs.length) selected = jobs[0].job_id;
+            if (mark !== fingerprint) {
+              fingerprint = mark;
+              const scroll =
+                $("detail").querySelector(".result")?.scrollTop || 0;
+              render();
+              const pre = $("detail").querySelector(".result");
+              if (pre) pre.scrollTop = scroll;
+            }
+            $("running-count").textContent = jobs.filter(
+              (j) => j.status === "running",
+            ).length;
+            sync(
+              paused ? "自动刷新已暂停" : `更新于 ${stamp(data.updated_at)}`,
+            );
+          } catch (e) {
+            sync("连接中断，正在重试", true);
+          } finally {
+            fetching = false;
+            if (!paused) timer = setTimeout(poll, 1500);
+          }
+        }
+        $("refresh").onclick = () => poll(true);
+        $("pause").onclick = () => {
+          paused = !paused;
+          $("pause").textContent = paused ? "继续" : "暂停";
+          if (paused) {
+            clearTimeout(timer);
+            sync("自动刷新已暂停");
+          } else poll();
+        };
+        setInterval(() => {
+          for (const n of document.querySelectorAll("[data-duration]")) {
+            const j = jobs.find((j) => j.job_id === n.dataset.duration);
+            if (j) n.textContent = duration(j);
+          }
+        }, 1000);
+        async function init() {
+          try {
+            config = await request("config");
+            settingsForm();
+            updateSummary();
+            if (config.default_project_dir)
+              $("task-project").value = config.default_project_dir;
+            if (!Object.values(config.profiles).some((p) => p.ready)) {
+              tab("settings");
+              alert("settings-alert", "选择一个代理，填写连接配置后开始使用。");
+            }
+          } catch (e) {
+            alert("settings-alert", e.message, "error");
+            tab("settings");
+          }
+          poll();
+        }
+        init();
+      })();
+    </script>
+  </body>
+</html>

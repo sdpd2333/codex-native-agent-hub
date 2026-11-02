@@ -1,0 +1,59 @@
+"""Claude Code through its official SDK, native hooks and stream events."""
+from pathlib import Path
+from runtimes.gemini import instructions
+
+READ_TOOLS = ["Read", "Glob", "Grep"]
+EDIT_TOOLS = READ_TOOLS + ["Write", "Edit", "Bash"]
+
+
+def make_options(project, mode, profile, key, run_dir, events):
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+    tools = EDIT_TOOLS if mode == "edit" else READ_TOOLS
+
+    async def before(data, call_id, _context):
+        name = data.get("tool_name", "")
+        allowed = name in tools
+        values = data.get("tool_input", {})
+        if isinstance(values, dict):
+            path = values.get("file_path") or values.get("path")
+            if path and name != "Bash":
+                resolved = Path(path)
+                if not resolved.is_absolute():
+                    resolved = project / resolved
+                allowed = allowed and resolved.resolve().is_relative_to(project.resolve())
+        if not allowed:
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": "Outside the assigned tool set or workspace."}}
+        events.tool(call_id or data.get("tool_use_id", name), name)
+        return {}
+
+    async def after(data, call_id, _context):
+        events.tool(call_id or data.get("tool_use_id", "tool"), data.get("tool_name", "tool"), done=True,
+                    failed=data.get("hook_event_name") == "PostToolUseFailure")
+        return {}
+
+    env = {"ANTHROPIC_BASE_URL": profile["base_url"], "ANTHROPIC_API_KEY": key, "ANTHROPIC_AUTH_TOKEN": "",
+           "CLAUDE_CONFIG_DIR": str(run_dir / "claude"), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+           "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "CLAUDECODE": ""}
+    kwargs = {"effort": profile["effort"]} if profile.get("effort") else {}
+    return ClaudeAgentOptions(cwd=str(project), model=profile["model"], env=env, tools=tools, allowed_tools=tools,
+        permission_mode="dontAsk", max_turns=40, setting_sources=[], strict_mcp_config=True,
+        system_prompt={"type": "preset", "preset": "claude_code", "append": instructions(project, mode)},
+        include_partial_messages=True, stderr=lambda _line: None,
+        hooks={"PreToolUse": [HookMatcher(hooks=[before])], "PostToolUse": [HookMatcher(hooks=[after])],
+               "PostToolUseFailure": [HookMatcher(hooks=[after])]}, **kwargs)
+
+
+async def run(task, project, mode, profile, key, run_dir, events):
+    from claude_agent_sdk import ClaudeSDKClient, StreamEvent, ResultMessage
+    result = None
+    async with ClaudeSDKClient(options=make_options(project, mode, profile, key, run_dir, events)) as client:
+        await client.query(task)
+        async for message in client.receive_response():
+            if isinstance(message, StreamEvent) and message.event.get("type") == "message_start":
+                events.model(message.event.get("message", {}).get("id") or message.uuid)
+            elif isinstance(message, ResultMessage):
+                if message.is_error:
+                    raise RuntimeError("Claude Code 未完成任务：" + str(message.subtype))
+                result = message.result
+    return result or ""

@@ -1,0 +1,4 @@
+google-antigravity==0.1.23
+claude-agent-sdk==0.2.176
+deepseek-harness-sdk==0.2.1rc2
+mcp==1.30.0
