@@ -926,7 +926,8 @@
                 >
               </label>
               <p class="hint">
-                按模型名称区分轻量、快速、均衡与高能力档，再根据任务复杂度匹配。
+                默认策略：Gemini 先比较版本号再匹配 Flash / 高能力档；Claude
+                沿用原规则；DeepSeek 仅自动匹配 Flash。
                 名称判断仅供参考；无法匹配时沿用默认模型。规则可在下方说明的位置自定义。
               </p>
               <details class="hint">
@@ -934,7 +935,8 @@
                 <p>
                   策略文件位于项目根目录的 <code>model_selection.py</code>。
                   修改 <code>NAME_RULES</code> 可调整模型名称与档位，
-                  <code>PREFERENCES</code> 可调整各类任务的档位优先顺序，
+                  <code>PREFERENCES</code> 可分别调整各代理的任务档位优先顺序，
+                  <code>VERSION_FIRST</code> 可调整哪些代理优先比较版本，
                   <code>COMPLEXITIES</code> 可调整 Codex 的复杂度判断说明。
                   保存后重新加载 MCP 服务并重启面板。完整示例见
                   README「自定义策略」。

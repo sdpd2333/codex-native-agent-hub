@@ -18,10 +18,11 @@ import server
 
 
 class NamePolicyTests(unittest.TestCase):
-    def test_simple_task_uses_exact_flash_alias_instead_of_default_argon(self):
+    def test_simple_task_uses_exact_flash_id_within_latest_gemini_version(self):
         chosen = model_selection.choose_model(
-            ['gemini-4-argon', 'models/gemini-3.8-flash', 'gpt-5-mini'], 'gemini', 'gemini-4-argon', 'simple')
-        self.assertEqual(chosen['model'], 'models/gemini-3.8-flash')
+            ['gemini-4-argon', 'models/gemini-4-flash', 'gemini-3.8-flash', 'gpt-5-mini'],
+            'gemini', 'gemini-4-argon', 'simple')
+        self.assertEqual(chosen['model'], 'models/gemini-4-flash')
         self.assertEqual(chosen['mode'], 'automatic')
         self.assertTrue(model_selection.describe_model('3.8flash', 'gemini')['eligible'])
         self.assertEqual(model_selection.describe_model('4argon', 'gemini')['tier'], 'strong')
@@ -29,8 +30,8 @@ class NamePolicyTests(unittest.TestCase):
     def test_provider_specific_families_and_ambiguous_names(self):
         cases = [('claude-haiku-4-5', 'claude', 'fast'), ('claude-sonnet-4-6', 'claude', 'balanced'),
                  ('claude-opus-4-6', 'claude', 'strong'), ('claude-fable-5', 'claude', 'strong'),
-                 ('deepseek-v4-flash', 'deepseek', 'fast'), ('deepseek-v4-pro', 'deepseek', 'strong'),
-                 ('deepseek-v3.2', 'deepseek', 'balanced'), ('deepseek-r1', 'deepseek', 'strong')]
+                 ('deepseek-v4-flash', 'deepseek', 'fast'), ('gemini-4-flash-lite', 'gemini', 'fast'),
+                 ('gemini-4-pro', 'gemini', 'strong'), ('gemini-4-ultra', 'gemini', 'strong')]
         for name, backend, tier in cases:
             with self.subTest(name=name):
                 self.assertEqual(model_selection.describe_model(name, backend)['tier'], tier)
@@ -43,17 +44,62 @@ class NamePolicyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse(model_selection.describe_model(name, 'gemini')['eligible'])
 
-    def test_version_sort_does_not_cross_tiers_or_use_release_dates(self):
+    def test_gemini_version_precedes_tier_without_using_release_dates(self):
         models = ['gemini-4-pro', 'gemini-3.8-flash', 'gemini-2.5-flash-20991231']
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'simple')['model'], models[1])
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'simple')['model'], models[0])
         self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'complex')['model'], models[0])
         self.assertEqual(model_selection._version('claude-sonnet-4-6-20261103-1m'), (4, 6, 0))
         self.assertEqual(model_selection._version('gemini-2.5-flash-8b'), (2, 5, 0))
 
-    def test_stable_before_preview_and_default_wins_equal_versions(self):
-        models = ['gemini-4-flash-preview', 'gemini-3.8-flash', 'models/gemini-3.8-flash']
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[2], 'simple')['model'], models[2])
-        self.assertEqual(model_selection.choose_model([models[0]], 'gemini', 'old', 'simple')['model'], models[0])
+    def test_claude_keeps_stable_before_preview_and_tier_before_version(self):
+        models = ['claude-haiku-5-preview', 'claude-haiku-4-5', 'vendor/claude-haiku-4-5', 'claude-opus-6']
+        self.assertEqual(model_selection.choose_model(models, 'claude', models[2], 'simple')['model'], models[2])
+        self.assertEqual(model_selection.choose_model([models[0]], 'claude', 'old', 'simple')['model'], models[0])
+
+    def test_latest_gemini_preview_precedes_old_stable_but_same_version_prefers_stable(self):
+        models = ['gemini-4-flash-preview', 'gemini-3.8-flash']
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'simple')['model'], models[0])
+        models.append('gemini-4-flash')
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'simple')['model'], models[2])
+        models.append('models/gemini-4-flash')
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[3], 'simple')['model'], models[3])
+
+    def test_latest_gemini_version_still_requires_complex_task_tier(self):
+        chosen = model_selection.choose_model(
+            ['gemini-4-flash', 'gemini-3.8-pro'], 'gemini', 'my-saved-default', 'complex')
+        self.assertEqual(chosen['model'], 'my-saved-default')
+        self.assertEqual(chosen['mode'], 'fallback')
+        self.assertIn('最高可识别版本', chosen['reason'])
+
+    def test_gemini_handles_unversioned_aliases_without_inventing_versions(self):
+        models = ['gemini-flash-latest', 'gemini-4-pro', 'gemini-5-flash-image']
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'simple')['model'], models[1])
+        models = ['gemini-flash-latest', 'gemini-pro-latest']
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'simple')['model'], models[0])
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'complex')['model'], models[1])
+
+    def test_deepseek_only_routes_flash_for_every_complexity(self):
+        models = ['deepseek-v5-pro', 'deepseek-v4-flash', 'deepseek-v3.2', 'deepseek-r1', 'deepseek-chat',
+                  'deepseek-lite', 'deepseek-reasoner', 'deepseek-v5-flash-preview']
+        for model in models:
+            self.assertEqual(model_selection.describe_model(model, 'deepseek')['eligible'], 'flash' in model)
+        for complexity in model_selection.COMPLEXITIES:
+            with self.subTest(complexity=complexity):
+                chosen = model_selection.choose_model(models, 'deepseek', models[0], complexity)
+                self.assertEqual(chosen['model'], 'deepseek-v4-flash')
+                self.assertEqual(chosen['tier'], 'fast')
+        fallback = model_selection.choose_model(['deepseek-v5-pro'], 'deepseek', 'deepseek-v5-pro', 'simple')
+        self.assertEqual(fallback['mode'], 'fallback')
+
+    def test_policy_exposes_provider_specific_order_and_customization(self):
+        for backend in ('gemini', 'claude', 'deepseek'):
+            policy = model_selection.policy(True, backend)
+            self.assertEqual(policy['backend'], backend)
+            self.assertEqual(policy['version_first'], backend == 'gemini')
+            self.assertEqual(policy['tier_order'], model_selection.PREFERENCES[backend])
+            self.assertIn('VERSION_FIRST', policy['customization'])
+        for model in ('gemini-nano', 'gemini-4-lite'):
+            self.assertFalse(model_selection.describe_model(model, 'gemini')['eligible'])
 
     def test_unknown_catalog_and_complex_task_never_guess_a_downgrade(self):
         for models in ([], ['private-alias'], ['gemini-3.8-flash', 'gemini-3.8-flash-lite']):
@@ -132,9 +178,9 @@ class AutomaticSelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_automatic_model_is_temporary_visible_and_persisted(self):
         self.enable()
-        with patch.object(common, 'fetch_models', return_value=['gemini-4-argon', 'gemini-3.8-flash']):
+        with patch.object(common, 'fetch_models', return_value=['gemini-4-argon', 'gemini-4-flash']):
             job = await self.submit(task_complexity='simple')
-        self.assertEqual(job['model'], 'gemini-3.8-flash')
+        self.assertEqual(job['model'], 'gemini-4-flash')
         self.assertEqual(self.payloads[-1]['model'], job['model'])
         self.assertEqual(common.load_settings()['model'], 'gemini-4-argon')
         self.assertEqual(progress.load_job(job['job_id'])['model_selection']['mode'], 'automatic')

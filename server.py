@@ -95,7 +95,7 @@ def profile_status(backend: str) -> dict:
     settings = common.load_settings(backend)
     configured = common.has_key(backend)
     return {**settings, **common.PROVIDERS[backend], "backend": backend, "key_configured": configured,
-            "model_selection_policy": model_selection.policy(settings["auto_select_model"]),
+            "model_selection_policy": model_selection.policy(settings["auto_select_model"], backend),
             "ready": configured and bool(settings["model"]) and bool(settings["base_url"]),
             "key_source": "environment" if os.environ.get("AGENT_HUB_" + backend.upper() + "_API_KEY", "").strip()
                           else "local" if configured else "none"}
@@ -193,7 +193,7 @@ async def list_models(backend: Literal["gemini", "claude", "deepseek"] = "gemini
     matches = [model for model in models if query.casefold() in model.casefold()]
     return {"backend": backend, "models": matches, "matched_count": len(matches), "total_count": len(models),
             "selected": settings["model"], "model_candidates": model_selection.catalog(matches, backend),
-            "model_selection_policy": model_selection.policy(settings["auto_select_model"])}
+            "model_selection_policy": model_selection.policy(settings["auto_select_model"], backend)}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True))
