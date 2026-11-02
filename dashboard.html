@@ -432,6 +432,19 @@
         color: var(--muted);
         margin: 4px 0 0 21px;
       }
+      .auto-choice {
+        display: block;
+      }
+      .selection-note {
+        margin-top: 12px;
+        padding: 10px 12px;
+        border-radius: 7px;
+        background: var(--tint);
+        color: var(--accent);
+        font-size: 11px;
+        line-height: 1.7;
+        overflow-wrap: anywhere;
+      }
       .alert {
         border-radius: 8px;
         padding: 11px 13px;
@@ -728,7 +741,23 @@
                 placeholder="留空使用该代理已保存的模型"
               /><datalist id="task-models"></datalist>
               <p class="hint">
-                填写中转站返回的完整模型 ID。可在连接设置中拉取列表。
+                填写完整模型 ID 可覆盖本次选型；留空遵循该代理的自动选型开关。
+              </p>
+            </div>
+            <div class="field" id="task-complexity-field" hidden>
+              <label for="task-complexity">任务复杂度</label
+              ><select id="task-complexity">
+                <option value="simple">简单 · 文案、样式、局部小修</option>
+                <option value="standard" selected>
+                  常规 · 功能开发与一般排错
+                </option>
+                <option value="complex">
+                  复杂 · 架构、深度排错或高风险修改
+                </option>
+              </select>
+              <p class="hint">
+                在对话中委派时由 Codex
+                判断；在此手动提交时由你选择。系统按模型名称匹配适合的档位。
               </p>
             </div>
             <div class="field">
@@ -885,6 +914,33 @@
                 可用强度取决于模型与中转站；默认使用原生运行环境的设置。
               </p>
             </div>
+            <div class="field">
+              <label class="choice auto-choice" for="auto-select-model"
+                ><input
+                  type="checkbox"
+                  id="auto-select-model"
+                />自动选择适配模型
+                <small
+                  >默认关闭。开启后允许 Codex
+                  判断任务复杂度，并为本次任务选择其他模型；默认模型保持不变。</small
+                >
+              </label>
+              <p class="hint">
+                按模型名称区分轻量、快速、均衡与高能力档，再根据任务复杂度匹配。
+                名称判断仅供参考；无法匹配时沿用默认模型。规则可在下方说明的位置自定义。
+              </p>
+              <details class="hint">
+                <summary>自定义选型策略</summary>
+                <p>
+                  策略文件位于项目根目录的 <code>model_selection.py</code>。
+                  修改 <code>NAME_RULES</code> 可调整模型名称与档位，
+                  <code>PREFERENCES</code> 可调整各类任务的档位优先顺序，
+                  <code>COMPLEXITIES</code> 可调整 Codex 的复杂度判断说明。
+                  保存后重新加载 MCP 服务并重启面板。完整示例见
+                  README「自定义策略」。
+                </p>
+              </details>
+            </div>
             <div class="alert" id="settings-alert" role="status" hidden></div>
             <div class="row">
               <button class="btn" id="test" type="button">测试基础生成</button
@@ -1006,9 +1062,13 @@
           const b = $("task-backend").value,
             p = config.profiles[b] || {};
           $("task-profile").textContent = p.ready
-            ? `已配置 · ${p.runtime} · 默认模型 ${p.model}`
+            ? `已配置 · ${p.runtime} · 默认模型 ${p.model} · 自动选型${p.auto_select_model ? "已开启" : "已关闭"}`
             : `${names[b]} 尚未配置，请先打开连接设置。`;
-          $("task-model").placeholder = p.model || "留空使用已保存的模型";
+          $("task-model").placeholder = p.auto_select_model
+            ? "留空按任务复杂度自动选择"
+            : p.model || "留空使用已保存的模型";
+          $("task-complexity-field").hidden =
+            !p.auto_select_model || Boolean($("task-model").value.trim());
           $("task-models").replaceChildren(
             ...(modelLists[b] || []).map((m) => {
               const o = el("option");
@@ -1026,6 +1086,7 @@
             );
           $("base-url").value = p.base_url || "";
           $("model").value = p.model || "";
+          $("auto-select-model").checked = p.auto_select_model === true;
           $("api-key").value = "";
           $("protocol").textContent = protocols[backend];
           $("key-status").textContent =
@@ -1077,6 +1138,7 @@
             key: $("api-key").value,
             model: $("model").value.trim(),
             effort: $("effort").value,
+            auto_select_model: $("auto-select-model").checked,
           };
         }
         function renderModels() {
@@ -1151,6 +1213,7 @@
         $("fetch-models").onclick = () => settingAction("models");
         $("test").onclick = () => settingAction("test");
         $("save").onclick = () => settingAction("config");
+        $("task-model").oninput = taskProfile;
         $("task-backend").onchange = () => {
           $("task-model").value = "";
           taskProfile();
@@ -1183,6 +1246,11 @@
               mode: document.querySelector("[name=mode]:checked").value,
               workspace_mode: $("task-workspace").value,
               timeout_seconds: Number($("task-timeout").value),
+              task_complexity:
+                config.profiles[b]?.auto_select_model &&
+                !$("task-model").value.trim()
+                  ? $("task-complexity").value
+                  : null,
             });
             selected = data.job_id;
             alert("task-alert", "");
@@ -1264,6 +1332,26 @@
             ),
             el("div", "detail-meta", j.job_id),
           );
+          if (j.model_selection) {
+            const selection = j.model_selection,
+              labels = {
+                automatic: "自动选型",
+                fallback: "选型回退",
+                explicit: "本次指定",
+                default: "默认模型",
+              };
+            top.append(
+              el(
+                "div",
+                "selection-note",
+                `${labels[selection.mode] || "模型选择"} · ${selection.reason || ""}` +
+                  (selection.default_model &&
+                  selection.default_model !== j.model
+                    ? ` 默认模型仍为 ${selection.default_model}。`
+                    : ""),
+              ),
+            );
+          }
           const metrics = el("div", "metrics"),
             time = metric("运行时长", duration(j));
           time.querySelector(".value").dataset.duration = j.job_id;

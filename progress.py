@@ -15,7 +15,7 @@ import common
 from events import read_activity
 
 JOB_ID = re.compile(r"[0-9a-f]{16}\Z")
-PUBLIC_FIELDS = ("job_id", "title", "backend", "runtime", "model", "mode", "project_dir", "workspace", "status", "started_at",
+PUBLIC_FIELDS = ("job_id", "title", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "status", "started_at",
                  "finished_at", "result", "error", "_pid", "_control_url")
 TOOL_LABELS = {
     "view_file": "读取文件", "list_dir": "浏览目录", "search_dir": "搜索目录",
@@ -195,7 +195,7 @@ def _snapshot(job: dict, *, include_result: bool = True) -> dict:
         status = "interrupted"
     if status != "running":
         activity["phase"] = FINAL_LABELS.get(status, status)
-    data = {key: job[key] for key in ("job_id", "title", "backend", "runtime", "model", "mode", "project_dir", "workspace", "started_at", "finished_at", "error")
+    data = {key: job[key] for key in ("job_id", "title", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error")
             if key in job}
     data.update(status=status, project_name=Path(job.get("project_dir", "")).name,
                 progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")))

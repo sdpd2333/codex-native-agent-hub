@@ -22,6 +22,7 @@ Codex / 本地面板
 
 - 在一个面板中为三种代理分别设置 Base URL、Key、模型和适用的推理强度。
 - 从中转站拉取模型列表，保留准确 ID，搜索、选择或为本次任务覆盖模型。
+- 可为每个代理开启「自动选择适配模型」（默认关闭），由 Codex 判断复杂度后按模型名称为单次任务选型。
 - 按原生协议测试基础生成；通过任务验证流式响应与真实文件工具。
 - 默认只读审查；编辑任务默认创建独立 Git worktree，保留变更供检查和合并。
 - 查看实际阶段、工具活动、调用次数、耗时、结果和历史；支持取消与超时。
@@ -74,6 +75,45 @@ Codex 调用 `get_panel(project_dir=项目绝对路径)`，再通过桌面应用
 
 加 `--no-browser` 只输出本机面板地址。服务结束后旧地址失效，重新获取即可。
 
+## 自动选择适配模型
+
+在「连接设置」为需要的代理勾选「自动选择适配模型」并保存。三种代理独立设置，旧配置升级后也默认关闭。开启后，无需在每次对话中指定模型，例如直接说「让 Gemini 调整这个页面的按钮样式」。Codex 根据范围、风险和不确定性判断 `task_complexity`；服务从该代理的**实时模型列表**中匹配完整 ID，只覆盖当前新任务。
+
+| Codex 判断的任务复杂度 | 典型任务 | 名称档位优先顺序 |
+| --- | --- | --- |
+| `simple` | 文案、样式、已知原因的局部小修、只读摘要 | 轻量 → 快速 → 均衡 |
+| `standard` | 范围明确的功能、测试和一般排错 | 均衡 → 快速 → 高能力 |
+| `complex` | 架构、困难排错、大范围重构、安全/权限/并发/数据迁移 | 高能力；没有则保留默认模型 |
+
+名称规则：Gemini 的 Lite / Nano 视为轻量、Flash 为快速、Pro / Argon / Ultra 为高能力；Claude 的 Haiku 为快速、Sonnet 为均衡、Opus / Fable 为高能力；DeepSeek 的 Lite 为轻量、Flash 为快速、Chat / V3 为均衡、Pro / Reasoner / R1 为高能力。同档优先稳定版，然后比较系列档位和版本号，同分优先已保存模型。版本号不跨能力档位比较，发布日期、上下文长度和参数规模不作为版本号。
+
+仅识别对应代理的家族名称和少数明确别名（例如 Gemini 配置下的 `3.8flash`）。不自动选择其他家族、嵌入/图片/音视频等专用模型，无法识别的名称留给手动指定。列表拉取失败或没有合适档位时使用保存的默认模型。规则是**名称启发式**，不读取价格、不承诺实际能力或工具兼容性，也不会自动重试升级。
+
+你在对话或「本次模型」中明确指定的 ID 始终优先；自动选型不会修改默认模型、切换代理或改变保存的推理强度。任务详情会显示实际模型、选型方式和原因。面板手动新建任务时由你选择复杂度；服务本身不会额外调用模型分析任务。
+
+MCP 客户端需重新加载服务以获取新参数和策略。`get_configuration` 返回每个代理的开关及 `model_selection_policy`，`list_models` 额外返回名称分类。开启自动选型且未指定 `model` 时，`submit_task` 必须提供 `task_complexity`；关闭时仍直接使用默认模型。不要调用 `select_model` 实现临时选型。
+
+### 自定义策略
+
+**策略集中在项目根目录的 [`model_selection.py`](model_selection.py)，可直接编辑。** 配置面板的「自定义选型策略」也会指出此位置。
+
+| 位置 | 可以调整什么 |
+| --- | --- |
+| `COMPLEXITIES` | Codex 判断简单、常规、复杂任务时采用的说明 |
+| `NAME_RULES` | 每个代理的名称提示词与档位；提示词为小写，档位为 `light` / `fast` / `balanced` / `strong`，先匹配的规则优先 |
+| `PREFERENCES` | 每种任务复杂度选择档位的先后顺序；没有合适档位则回退默认模型 |
+| `FLAGSHIP_HINTS` | 同档稳定型号中优先选择的旗舰系列提示词 |
+| `SPECIALIZED` | 不自动用于编码任务的专用模型名称提示词 |
+| `_version` / `choose_model` | 更细的版本比较与同档排序逻辑 |
+
+例如，希望常规开发也优先用 Flash / Haiku，可以把 `PREFERENCES` 中的 `standard` 改为：
+
+```python
+"standard": ("fast", "balanced", "strong"),
+```
+
+新增模型系列时，在对应代理的 `NAME_RULES` 中加入提示词和档位，例如 `("newseries", "balanced")`；默认只自动识别对应代理家族，完全自定义的别名还需调整 `describe_model` 的别名识别。**修改后重新加载 MCP 服务，并重启面板**，再运行单元测试确认符合你的预期。修改这些规则不会更改已保存的默认模型或已经启动的任务。
+
 ## 中转站的协议要求
 
 | 代理 | 原生运行环境 | 模型调用接口 | 只读工具 |
@@ -124,7 +164,7 @@ git -C <worktree路径> status --short
 | `get_changes(job_id)` | 读取工作区差异和新增文件名 |
 | `cancel_job(job_id)` | 终止本机工作进程树，保留文件修改 |
 
-`submit_task` 参数包括 `task`、绝对路径 `project_dir`、`backend=gemini|claude|deepseek`、`mode=review|edit`、可选 `model`、`workspace_mode=worktree|direct`、`timeout_seconds`。默认 Gemini、review、worktree，超时 600 秒（可设 10–1800 秒）。
+`submit_task` 参数包括 `task`、绝对路径 `project_dir`、`backend=gemini|claude|deepseek`、`mode=review|edit`、可选 `model`、可选 `task_complexity=simple|standard|complex`、`workspace_mode=worktree|direct`、`timeout_seconds`。默认 Gemini、review、worktree，超时 600 秒（可设 10–1800 秒）。
 
 ## 凭据与本地数据
 

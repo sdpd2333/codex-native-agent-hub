@@ -131,16 +131,18 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_configuration_round_trip_and_saved_key_is_not_returned(self):
         key = "panel-fixture-credential"
-        payload = {"base_url": "https://relay.example.com/v1", "key": key, "model": "gemini-alias"}
+        payload = {"base_url": "https://relay.example.com/v1", "key": key, "model": "gemini-alias", "auto_select_model": True}
         status, body, _ = await self.request("api/config", "POST", payload)
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["ready"])
+        self.assertTrue(json.loads(body)["auto_select_model"])
         self.assertNotIn(key.encode(), body)
         self.assertEqual(common.load_key(), key)
         self.assertEqual(common.load_settings()["base_url"], "https://relay.example.com")
         status, body, _ = await self.request("api/config")
         self.assertEqual(status, 200)
         self.assertNotIn(key.encode(), body)
+        self.assertTrue(json.loads(body)["profiles"]["gemini"]["auto_select_model"])
         self.assertNotIn(key.encode(), (common.STATE_DIR / "gemini.dpapi").read_bytes())
         with patch.object(common, "fetch_models", return_value=["gemini-alias", "vendor-exact-ID"]) as fetch:
             status, body, _ = await self.request("api/models", "POST", {**payload, "key": ""})

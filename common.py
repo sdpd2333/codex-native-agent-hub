@@ -71,13 +71,13 @@ def load_settings(backend: str = "gemini") -> dict:
     check_backend(backend)
     path = STATE_DIR / "settings.json"
     if not path.exists():
-        return {"base_url": DEFAULT_BASE, "model": "", "effort": ""}
+        return {"base_url": DEFAULT_BASE, "model": "", "effort": "", "auto_select_model": False}
     try:
         with _settings_lock:
             data = json.loads(path.read_text(encoding="utf-8")).get("profiles", {}).get(backend, {})
         base = str(data.get("base_url", ""))
         return {"base_url": normalize_base(base) if base else "", "model": str(data.get("model", "")),
-                "effort": str(data.get("effort", ""))}
+                "effort": str(data.get("effort", "")), "auto_select_model": data.get("auto_select_model") is True}
     except (OSError, ValueError, KeyError, AttributeError, TypeError) as exc:
         raise RelayError("本地配置无法读取，请检查状态目录中的 settings.json。") from exc
 
@@ -93,11 +93,17 @@ def validate_profile(base_url: str, model: str, backend: str = "gemini", effort:
     return {"base_url": normalize_base(base_url), "model": model.strip(), "effort": effort}
 
 
-def save_settings(base_url: str, model: str, backend: str = "gemini", effort: str = "") -> None:
+def save_settings(base_url: str, model: str, backend: str = "gemini", effort: str = "",
+                  auto_select_model: bool | None = None) -> None:
     payload = validate_profile(base_url, model, backend, effort)
+    if auto_select_model is not None and not isinstance(auto_select_model, bool):
+        raise RelayError("自动选择适配模型必须为布尔值。")
     with _settings_lock:
         path = STATE_DIR / "settings.json"
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"profiles": {}}
+        previous = data.get("profiles", {}).get(backend, {})
+        payload["auto_select_model"] = (previous.get("auto_select_model") is True
+                                        if auto_select_model is None else auto_select_model)
         data.setdefault("profiles", {})[backend] = payload
         _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
 

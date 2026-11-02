@@ -123,7 +123,7 @@ class JobIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payloads[0]['profile'], {'base_url': 'https://original.example.com', 'model': 'original-model', 'effort': 'high'})
         self.assertEqual(payloads[0]['key'], 'original-fixture')
         self.assertNotIn('original-fixture', str(commands))
-        self.assertNotIn('original-fixture', (progress.job_dir(job['job_id']) / 'job.json').read_text())
+        self.assertNotIn('original-fixture', (progress.job_dir(job['job_id']) / 'job.json').read_text(encoding='utf-8'))
 
     async def test_invalid_configuration_does_not_replace_saved_key(self):
         common.save_key('old-key', 'deepseek')

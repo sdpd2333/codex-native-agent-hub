@@ -18,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import common
 import dashboard
+import model_selection
 import progress
 import runtimes
 import workspaces
@@ -79,6 +80,11 @@ async def lifespan(_server):
 mcp = FastMCP("native-agent-hub", lifespan=lifespan, instructions=
     "Delegate tasks to Gemini/Antigravity, Claude/Claude Code or DeepSeek/dsh using their native SDKs. "
     "Use get_configuration first; the user selects models and enters credentials in get_panel's local UI. "
+    "Follow model_selection_policy for the chosen backend. If the user explicitly names a model, pass its exact ID "
+    "as model. Otherwise, when auto_select_model is true, judge task_complexity as simple/standard/complex using "
+    "the policy and submit it WITHOUT model; the server picks an exact live ID by model-name hints. When disabled, "
+    "use the saved default unless the user explicitly requests another model. Never call select_model for automatic "
+    "or one-task choices. Unknown names and catalog failures fall back to the saved default. "
     "Never request an API key in chat. Open the panel URL in a Codex right browser panel when available. "
     "submit_task returns immediately; poll get_job. Review is read-only. Edit permits file changes and commands "
     "only within the user's authorized task; it defaults to a separate clean Git worktree. "
@@ -89,6 +95,7 @@ def profile_status(backend: str) -> dict:
     settings = common.load_settings(backend)
     configured = common.has_key(backend)
     return {**settings, **common.PROVIDERS[backend], "backend": backend, "key_configured": configured,
+            "model_selection_policy": model_selection.policy(settings["auto_select_model"]),
             "ready": configured and bool(settings["model"]) and bool(settings["base_url"]),
             "key_source": "environment" if os.environ.get("AGENT_HUB_" + backend.upper() + "_API_KEY", "").strip()
                           else "local" if configured else "none"}
@@ -156,17 +163,21 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
                 return {"ok": True, "backend": backend, "reply": common.redact(reply, key),
                         "note": "基础生成通过；请再提交只读任务验证原生工具调用。"}
             # Validate the full profile before changing credentials for this backend.
+            automatic = payload.get("auto_select_model", common.load_settings(backend)["auto_select_model"])
+            if not isinstance(automatic, bool):
+                raise common.RelayError("自动选择适配模型必须为布尔值。")
             with common._settings_lock:
                 if entered:
                     common.save_key(entered, backend)
-                common.save_settings(base, profile["model"], backend, profile["effort"])
+                common.save_settings(base, profile["model"], backend, profile["effort"], automatic)
             return {"ok": True, **get_configuration(backend)}
         except Exception as exc:
             raise common.RelayError(common.redact(str(exc), key, str(payload.get("key", "")))) from None
     if action == "tasks":
         return await submit_task(payload.get("task"), payload.get("project_dir"), backend=backend,
             mode=payload.get("mode", "review"), model=payload.get("model") or None,
-            timeout_seconds=payload.get("timeout_seconds", 600), workspace_mode=payload.get("workspace_mode", "worktree"))
+            timeout_seconds=payload.get("timeout_seconds", 600), workspace_mode=payload.get("workspace_mode", "worktree"),
+            task_complexity=payload.get("task_complexity"))
     if action == "cancel":
         return await cancel_job(str(payload.get("job_id", "")))
     if action == "changes":
@@ -181,7 +192,8 @@ async def list_models(backend: Literal["gemini", "claude", "deepseek"] = "gemini
     models = await asyncio.to_thread(common.fetch_models, settings["base_url"], common.load_key(backend), backend)
     matches = [model for model in models if query.casefold() in model.casefold()]
     return {"backend": backend, "models": matches, "matched_count": len(matches), "total_count": len(models),
-            "selected": settings["model"]}
+            "selected": settings["model"], "model_candidates": model_selection.catalog(matches, backend),
+            "model_selection_policy": model_selection.policy(settings["auto_select_model"])}
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True))
@@ -267,12 +279,17 @@ async def execute(job: dict, task: str, timeout_seconds: int, profile: dict, key
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True))
 async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "claude", "deepseek"] = "gemini",
                       mode: Literal["review", "edit"] = "review", model: str | None = None,
-                      timeout_seconds: int = 600, workspace_mode: Literal["worktree", "direct"] = "worktree") -> dict:
+                      timeout_seconds: int = 600, workspace_mode: Literal["worktree", "direct"] = "worktree",
+                      task_complexity: Literal["simple", "standard", "complex"] | None = None) -> dict:
     """Delegate through a native runtime; return a job ID immediately. Poll get_job for results.
 
     Review only exposes read tools. Edit permits project changes and commands and defaults to a
     separate Git worktree (requires a clean committed source repository). Direct explicitly edits
     the given directory. Edits are kept for review and never automatically merged or discarded.
+
+    Explicit user model overrides win. Otherwise, when auto_select_model is enabled, Codex must
+    judge task_complexity from model_selection_policy and omit model. The server selects from
+    live IDs; saved defaults and reasoning effort stay unchanged. Disabled means use the default.
     """
     common.check_backend(backend)
     if not isinstance(task, str) or not task.strip() or len(task) > 100000:
@@ -286,6 +303,8 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
         raise common.RelayError("任务模式或工作区模式无效。")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 10 <= timeout_seconds <= 1800:
         raise common.RelayError("timeout_seconds 必须为 10 到 1800 之间的整数。")
+    if task_complexity is not None and (not isinstance(task_complexity, str) or task_complexity not in model_selection.COMPLEXITIES):
+        raise common.RelayError("task_complexity 必须为 simple、standard 或 complex。")
     settings = common.load_settings(backend)
     selected = settings["model"] if model is None else model
     if not isinstance(selected, str):
@@ -294,6 +313,25 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     key = common.load_key(backend)
     if sum(job["status"] == "running" for job in JOBS.values()) >= 2:
         raise common.RelayError("已有两个任务运行中，请等待完成或取消其中一个。")
+    selection = {"model": profile["model"], "mode": "explicit" if model is not None else "default",
+                 "default_model": settings["model"],
+                 "reason": "本次明确指定模型。" if model is not None else "自动选型已关闭，使用保存的默认模型。"}
+    if model is None and settings["auto_select_model"]:
+        if task_complexity is None:
+            raise common.RelayError("自动选型已开启：请由 Codex 判断任务复杂度并传入 task_complexity=simple/standard/complex。"
+                                    "手动面板可在新建任务中选择复杂度；旧 MCP 客户端请重新加载服务。")
+        try:
+            models = await asyncio.to_thread(common.fetch_models, profile["base_url"], key, backend)
+        except Exception:
+            # Discovery failures must not leak upstream details or prevent use of the saved model.
+            selection = model_selection.fallback(profile["model"], task_complexity,
+                                                  "拉取模型列表失败，沿用默认模型。")
+        else:
+            selection = model_selection.choose_model(models, backend, profile["model"], task_complexity)
+        profile["model"] = selection["model"]
+        # Model discovery yields the event loop, so recheck the running-job limit.
+        if sum(job["status"] == "running" for job in JOBS.values()) >= 2:
+            raise common.RelayError("已有两个任务运行中，请等待完成或取消其中一个。")
     if len(JOBS) >= 50:
         for job_id, old in list(JOBS.items()):
             if old["status"] != "running":
@@ -304,6 +342,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     panel = ensure_panel()
     job = {"job_id": job_id, "status": "running", "backend": backend, "runtime": common.PROVIDERS[backend]["runtime"],
            "model": profile["model"], "mode": mode, "project_dir": str(project.resolve()), "started_at": now(),
+           "model_selection": selection,
            "title": common.redact(task.strip().splitlines()[0], key)[:100],
            "_pid": os.getpid(), "_control_url": panel.url}
     JOBS[job_id] = job

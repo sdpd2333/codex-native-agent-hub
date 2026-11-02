@@ -37,11 +37,11 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(common.load_key(), key)
         self.assertNotIn(key.encode(), (common.STATE_DIR / "gemini.dpapi").read_bytes())
         common.save_settings("https://relay.example.com/v1", "gemini-example")
-        self.assertEqual(common.load_settings(), {"base_url": "https://relay.example.com", "model": "gemini-example", "effort": ""})
+        self.assertEqual(common.load_settings(), {"base_url": "https://relay.example.com", "model": "gemini-example", "effort": "", "auto_select_model": False})
         self.assertNotIn(key, (common.STATE_DIR / "settings.json").read_text())
 
     def test_new_checkout_has_no_provider_or_model(self):
-        self.assertEqual(common.load_settings(), {"base_url": "", "model": "", "effort": ""})
+        self.assertEqual(common.load_settings(), {"base_url": "", "model": "", "effort": "", "auto_select_model": False})
         self.assertFalse(common.has_key())
         self.assertNotEqual(common.default_state_dir(), common.APP_DIR)
 
@@ -162,9 +162,12 @@ async def mcp_smoke():
                 await session.initialize()
                 tools = await session.list_tools()
                 assert {tool.name for tool in tools.tools} == {"get_configuration", "get_panel", "list_models", "select_model", "test_connection", "submit_task", "get_job", "cancel_job", "get_changes"}
+                submit = next(tool for tool in tools.tools if tool.name == "submit_task")
+                assert "task_complexity" in submit.inputSchema["properties"]
                 config = await session.call_tool("get_configuration", {})
                 data = json.loads(config.content[0].text)
                 assert not data["ready"] and not data["key_configured"]
+                assert not data["auto_select_model"] and not data["model_selection_policy"]["enabled"]
                 result = await session.call_tool("list_models", {})
                 assert result.isError and "API Key" in result.content[0].text
 
