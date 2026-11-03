@@ -270,6 +270,12 @@
         align-items: start;
         justify-content: space-between;
       }
+      .detail-top h2 {
+        min-width: 0;
+      }
+      .detail-top .badge {
+        flex-shrink: 0;
+      }
       .detail-meta {
         font-size: 11px;
         color: var(--muted);
@@ -301,9 +307,14 @@
         margin-top: 13px;
       }
       .events {
+        position: relative;
         padding: 0;
         margin: 0;
         list-style: none;
+        max-height: min(360px, 45vh);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
       }
       .events li {
         display: flex;
@@ -734,15 +745,16 @@
               <p class="hint" id="task-profile"></p>
             </div>
             <div class="field">
-              <label for="task-model">本次模型</label
-              ><input
-                id="task-model"
-                list="task-models"
-                placeholder="留空使用该代理已保存的模型"
-              /><datalist id="task-models"></datalist>
-              <p class="hint">
-                填写完整模型 ID 可覆盖本次选型；留空遵循该代理的自动选型开关。
-              </p>
+              <div class="section-row">
+                <label for="task-model">本次模型</label>
+                <button id="task-fetch-models" class="btn small" type="button">
+                  刷新模型
+                </button>
+              </div>
+              <select id="task-model">
+                <option value="">使用默认模型</option>
+              </select>
+              <p class="hint" id="task-model-hint">选择仅影响本次任务。</p>
             </div>
             <div class="field" id="task-complexity-field" hidden>
               <label for="task-complexity">任务复杂度</label
@@ -993,6 +1005,8 @@
           fingerprint = "",
           activeTab = "monitor";
         const modelLists = {},
+          taskModelLists = {},
+          taskModelRequests = new Set(),
           changeCache = new Map();
         function el(tag, cls, text) {
           const n = document.createElement(tag);
@@ -1013,6 +1027,10 @@
             $("tab-" + t).setAttribute("aria-selected", String(t === id));
           }
           if (id === "monitor") render();
+          if (id === "task") {
+            taskProfile();
+            loadTaskModels();
+          }
         }
         for (const t of ["monitor", "task", "settings"])
           $("tab-" + t).onclick = () => tab(t);
@@ -1058,22 +1076,86 @@
         }
         function taskProfile() {
           const b = $("task-backend").value,
-            p = config.profiles[b] || {};
+            p = config.profiles[b] || {},
+            cached = taskModelLists[b],
+            cacheMatches = Boolean(cached && cached.base_url === p.base_url),
+            models = cacheMatches ? cached.models : [],
+            select = $("task-model"),
+            previous =
+              select.dataset.backend === b &&
+              select.dataset.baseUrl === p.base_url
+                ? select.value
+                : "",
+            loading = taskModelRequests.has(JSON.stringify([b, p.base_url])),
+            ids = [
+              ...new Set([...(models || []), ...(p.model ? [p.model] : [])]),
+            ];
           $("task-profile").textContent = p.ready
             ? `已配置 · ${p.runtime} · 默认模型 ${p.model} · 自动选型${p.auto_select_model ? "已开启" : "已关闭"}`
             : `${names[b]} 尚未配置，请先打开连接设置。`;
-          $("task-model").placeholder = p.auto_select_model
-            ? "留空按任务复杂度自动选择"
-            : p.model || "留空使用已保存的模型";
-          $("task-complexity-field").hidden =
-            !p.auto_select_model || Boolean($("task-model").value.trim());
-          $("task-models").replaceChildren(
-            ...(modelLists[b] || []).map((m) => {
-              const o = el("option");
-              o.value = m;
-              return o;
+          const fallback = el(
+            "option",
+            "",
+            p.auto_select_model
+              ? "自动选择 · 按任务复杂度匹配"
+              : p.model
+                ? `默认模型 · ${p.model}`
+                : "使用默认模型",
+          );
+          fallback.value = "";
+          select.replaceChildren(
+            fallback,
+            ...ids.map((model) => {
+              const option = el("option", "", model);
+              option.value = model;
+              return option;
             }),
           );
+          select.value = ids.includes(previous) ? previous : "";
+          select.dataset.backend = b;
+          select.dataset.baseUrl = p.base_url || "";
+          $("task-fetch-models").disabled = !p.ready || loading;
+          $("task-fetch-models").textContent = loading ? "拉取中…" : "刷新模型";
+          $("task-model-hint").textContent = loading
+            ? "正在拉取当前代理的模型…"
+            : cacheMatches
+              ? `已拉取 ${models.length} 个模型；选择仅影响本次任务。`
+              : "可刷新当前代理的模型列表；选择仅影响本次任务。";
+          $("task-complexity-field").hidden =
+            !p.auto_select_model || Boolean(select.value);
+        }
+        async function loadTaskModels(force = false) {
+          const b = $("task-backend").value,
+            p = config.profiles[b] || {},
+            requestKey = JSON.stringify([b, p.base_url]);
+          if (
+            !p.ready ||
+            taskModelRequests.has(requestKey) ||
+            (!force && taskModelLists[b]?.base_url === p.base_url)
+          )
+            return;
+          taskModelRequests.add(requestKey);
+          alert("task-alert", "");
+          taskProfile();
+          try {
+            const data = await request("models", {
+              backend: b,
+              base_url: p.base_url,
+            });
+            taskModelLists[b] = {
+              base_url: data.base_url,
+              models: Array.isArray(data.models) ? data.models : [],
+            };
+          } catch (error) {
+            if (
+              $("task-backend").value === b &&
+              config.profiles[b]?.base_url === p.base_url
+            )
+              alert("task-alert", error.message, "error");
+          } finally {
+            taskModelRequests.delete(requestKey);
+            taskProfile();
+          }
         }
         function settingsForm() {
           const p = config.profiles[backend] || {};
@@ -1178,6 +1260,10 @@
               modelLists[backend] = Array.isArray(data.models)
                 ? data.models
                 : [];
+              taskModelLists[backend] = {
+                base_url: data.base_url,
+                models: modelLists[backend],
+              };
               $("model-browser").hidden = false;
               renderModels();
               taskProfile();
@@ -1211,11 +1297,13 @@
         $("fetch-models").onclick = () => settingAction("models");
         $("test").onclick = () => settingAction("test");
         $("save").onclick = () => settingAction("config");
-        $("task-model").oninput = taskProfile;
+        $("task-model").onchange = taskProfile;
+        $("task-fetch-models").onclick = () => loadTaskModels(true);
         $("task-backend").onchange = () => {
           $("task-model").value = "";
           taskProfile();
           alert("task-alert", "");
+          loadTaskModels();
         };
         for (const radio of document.querySelectorAll("[name=mode]"))
           radio.onchange = () => {
@@ -1288,6 +1376,7 @@
               "job" + (j.job_id === selected ? " selected" : ""),
             );
             b.type = "button";
+            b.title = j.title || "未命名任务";
             b.append(
               el("div", "job-title", j.title || "未命名任务"),
               el(
@@ -1316,6 +1405,18 @@
         function renderDetail() {
           const j = jobs.find((j) => j.job_id === selected);
           if (!j) return;
+          const previousEvents = $("detail").querySelector(".events"),
+            sameJob = previousEvents?.dataset.jobId === j.job_id,
+            scrollTop = sameJob ? previousEvents.scrollTop : 0,
+            anchor =
+              scrollTop > 0
+                ? [...previousEvents.children].find(
+                    (item) => item.offsetTop + item.offsetHeight > scrollTop,
+                  )
+                : null,
+            anchorKey = anchor?.dataset.eventKey,
+            anchorOffset = anchor ? anchor.offsetTop - scrollTop : 0,
+            restoreFocus = sameJob && document.activeElement === previousEvents;
           $("detail").replaceChildren();
           const p = j.progress || {},
             top = el("div", "card"),
@@ -1460,8 +1561,15 @@
           const activity = el("div", "card");
           activity.append(el("h3", "", "最近活动"));
           const list = el("ol", "events");
-          for (const event of p.events || []) {
+          list.dataset.jobId = j.job_id;
+          list.tabIndex = 0;
+          list.setAttribute("aria-label", "最近活动，最新在前");
+          for (const event of [...(p.events || [])].reverse()) {
             const li = el("li");
+            li.dataset.eventKey = JSON.stringify([
+              event.timestamp,
+              event.label,
+            ]);
             li.append(
               el("time", "", stamp(event.timestamp)),
               el("span", "", event.label),
@@ -1474,6 +1582,15 @@
               el("p", "hint", "运行环境启动后，这里会显示工具活动。"),
             );
           $("detail").append(activity);
+          if (scrollTop > 0) {
+            const currentAnchor = [...list.children].find(
+              (item) => item.dataset.eventKey === anchorKey,
+            );
+            list.scrollTop = currentAnchor
+              ? currentAnchor.offsetTop - anchorOffset
+              : scrollTop;
+          }
+          if (restoreFocus) list.focus({ preventScroll: true });
           if (j.result) {
             const card = el("div", "card"),
               row = el("div", "section-row"),

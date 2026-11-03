@@ -154,7 +154,7 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
             base, key, entered = panel_credentials(payload, backend)
             if action == "models":
                 models = await asyncio.to_thread(common.fetch_models, base, key, backend)
-                return {"backend": backend, "models": models, "total_count": len(models),
+                return {"backend": backend, "base_url": base, "models": models, "total_count": len(models),
                         "selected": common.load_settings(backend)["model"]}
             profile = common.validate_profile(base, str(payload.get("model", "")).strip(), backend,
                                                str(payload.get("effort", "")))
@@ -343,7 +343,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     job = {"job_id": job_id, "status": "running", "backend": backend, "runtime": common.PROVIDERS[backend]["runtime"],
            "model": profile["model"], "mode": mode, "project_dir": str(project.resolve()), "started_at": now(),
            "model_selection": selection,
-           "title": common.redact(task.strip().splitlines()[0], key)[:100],
+           "title": common.redact(task.strip().splitlines()[0], key),
            "_pid": os.getpid(), "_control_url": panel.url}
     JOBS[job_id] = job
     progress.save_job(job)
