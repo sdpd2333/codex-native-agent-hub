@@ -163,7 +163,10 @@ async def mcp_smoke():
                 tools = await session.list_tools()
                 assert {tool.name for tool in tools.tools} == {"get_configuration", "get_panel", "list_models", "select_model", "test_connection", "submit_task", "get_job", "cancel_job", "get_changes"}
                 submit = next(tool for tool in tools.tools if tool.name == "submit_task")
-                assert "task_complexity" in submit.inputSchema["properties"]
+                assert {"task_complexity", "title", "task_kind", "model_override_reason"} <= submit.inputSchema["properties"].keys()
+                rejected = await session.call_tool("submit_task", {
+                    "task": "Only reply OK", "project_dir": str(APP), "model": "copied-default"})
+                assert rejected.isError and "model_override_reason" in rejected.content[0].text
                 config = await session.call_tool("get_configuration", {})
                 data = json.loads(config.content[0].text)
                 assert not data["ready"] and not data["key_configured"]

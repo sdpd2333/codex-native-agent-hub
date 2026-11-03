@@ -11,6 +11,10 @@ async function main() {
   const state = fixture(),
     errors = [],
     evidence = [];
+  state.jobs[0].title =
+    "审查前端交互与可访问性，检查标题完整换行以及任务描述独立展示。".repeat(2);
+  state.descriptions[state.jobs[0].job_id].text =
+    "完整任务描述\n" + "长路径/".repeat(75) + "\n描述尾部应完整可见。";
   const output = path.resolve("outputs/validation");
   fs.mkdirSync(output, { recursive: true });
   const app = http.createServer(async (request, response) => {
@@ -65,6 +69,13 @@ async function main() {
       () => document.querySelector(".result").textContent.length > 0,
     );
     await page.locator("#pause").click();
+    await page.locator(".task-description summary").focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() =>
+      document
+        .querySelector(".description-text")
+        .textContent.endsWith("描述尾部应完整可见。"),
+    );
     for (const width of [320, 375, 480, 760, 1024]) {
       await page.setViewportSize({ width, height: 900 });
       for (const tab of ["monitor", "task", "settings"]) {
@@ -78,6 +89,35 @@ async function main() {
           dimensions.scroll <= dimensions.client + 1,
           `Overflow: ${width}px ${tab}`,
         );
+        if (tab === "monitor") {
+          assert.equal(
+            await page.locator("#detail h2").textContent(),
+            state.jobs[0].title,
+          );
+          assert.equal(
+            await page.locator(".description-text").textContent(),
+            state.descriptions[state.jobs[0].job_id].text,
+          );
+          const titleStyle = await page
+            .locator("#detail h2")
+            .evaluate((node) => ({
+              clamp: getComputedStyle(node).webkitLineClamp,
+              overflow: node.scrollHeight > node.clientHeight + 1,
+            }));
+          assert.equal(titleStyle.clamp, "none");
+          assert.equal(titleStyle.overflow, false);
+          const listTitle = await page
+            .locator(".job-title")
+            .first()
+            .evaluate((node) => ({
+              text: node.textContent,
+              clamp: getComputedStyle(node).webkitLineClamp,
+              overflow: node.scrollHeight > node.clientHeight + 1,
+            }));
+          assert.equal(listTitle.text, state.jobs[0].title);
+          assert.equal(listTitle.clamp, "none");
+          assert.equal(listTitle.overflow, false);
+        }
         const a11y = await page.evaluate(async (source) => {
           // Playwright evaluation executes in the isolated test harness; no production CSP change.
           (0, eval)(source);
@@ -199,7 +239,7 @@ async function main() {
         browser: browser.version(),
         layouts: evidence.length,
         axeViolations: 0,
-        interactions: 8,
+        interactions: 10,
         ok: true,
       }),
     );

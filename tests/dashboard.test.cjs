@@ -479,3 +479,101 @@ test("testing is separate from saving and a deliberate task provider is preserve
   for (let i = 0; i < 5; i++) await tick();
   assert.equal(h.$("task-backend").value, "gemini");
 });
+
+test("running tasks load the entire description on expansion and retain it across polls and switches", async (t) => {
+  const h = await harness(t),
+    full = "完整要求🙂\n".repeat(12000) + "描述末尾",
+    before = h.state.calls.filter((item) => item.action === "job").length;
+  h.state.descriptions["b".repeat(16)] = { text: full, complete: true };
+  h.select("b");
+  assert.equal(
+    h.state.calls.filter((item) => item.action === "job").length,
+    before,
+  );
+  const details = h.$("detail").querySelector(".task-description");
+  details.open = true;
+  details.dispatchEvent(new h.window.Event("toggle"));
+  await until(() => details.querySelector("pre").textContent === full);
+  const pre = details.querySelector("pre");
+  assert.match(details.textContent, /完整任务描述/);
+  assert.equal(
+    h.$("detail").querySelector("h2").textContent,
+    "Review project b",
+  );
+  await h.refresh();
+  h.select("a");
+  h.select("b");
+  assert.equal(h.$("detail").querySelector(".task-description"), details);
+  assert.equal(details.open, true);
+  assert.equal(details.querySelector("pre"), pre);
+  assert.equal(pre.textContent, full);
+  assert.equal(
+    h.state.calls.filter((item) => item.action === "job").length,
+    before + 1,
+  );
+  assert.ok(
+    h.state.calls
+      .filter(
+        (item) => item.action === "job" && item.payload.max_chars === 20000,
+      )
+      .every((item) => item.payload.include_description === false),
+  );
+});
+
+test("description errors are retryable and legacy fragments are clearly marked", async (t) => {
+  const h = await harness(t);
+  h.select("b");
+  const pending = deferred();
+  h.state.handlers.job = () => pending.promise;
+  const details = h.$("detail").querySelector(".task-description");
+  details.open = true;
+  details.dispatchEvent(new h.window.Event("toggle"));
+  h.select("a");
+  pending.reject(new Error("description unavailable"));
+  for (let i = 0; i < 6; i++) await tick();
+  assert.doesNotMatch(h.$("detail").textContent, /description unavailable/);
+  h.select("b");
+  assert.match(details.textContent, /description unavailable/);
+  delete h.state.handlers.job;
+  h.state.descriptions["b".repeat(16)] = {
+    text: "历史内容只有这些",
+    complete: false,
+  };
+  h.findButton("重试读取描述").click();
+  await until(
+    () => details.querySelector("pre").textContent === "历史内容只有这些",
+  );
+  assert.match(details.textContent, /历史任务未保存完整描述/);
+});
+
+test("connectivity form submits a short title and simple automatic choice without copying the saved model", async (t) => {
+  const state = fixture();
+  state.config.profiles.claude.auto_select_model = true;
+  const h = await harness(t, state);
+  h.$("tab-task").click();
+  h.input("task-title", "检查 Claude 连接");
+  h.input("task-prompt", "仅回复 OK");
+  h.$("task-complexity").value = "complex";
+  h.$("task-kind").value = "connectivity";
+  h.$("task-kind").dispatchEvent(new h.window.Event("change"));
+  assert.equal(h.$("task-complexity-field").hidden, true);
+  assert.equal(
+    h.window.document.querySelector("[name=mode][value=edit]").disabled,
+    true,
+  );
+  h.$("task-form").dispatchEvent(
+    new h.window.Event("submit", { cancelable: true }),
+  );
+  await until(() => state.calls.some((item) => item.action === "tasks"));
+  const payload = state.calls.find((item) => item.action === "tasks").payload;
+  assert.equal(payload.title, "检查 Claude 连接");
+  assert.equal(payload.task, "仅回复 OK");
+  assert.equal(payload.task_kind, "connectivity");
+  assert.equal(payload.task_complexity, "simple");
+  assert.equal(payload.mode, "review");
+  assert.equal(payload.model, "");
+  h.$("task-kind").value = "general";
+  h.$("task-kind").dispatchEvent(new h.window.Event("change"));
+  assert.equal(h.$("task-complexity-field").hidden, false);
+  assert.equal(h.$("task-complexity").value, "complex");
+});

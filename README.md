@@ -71,6 +71,8 @@ Codex 调用 `get_panel(project_dir=项目绝对路径)`，再通过桌面应用
 
 任务列表支持按源项目名和路径搜索，仅轮询最近 50 条任务摘要。选中任务后按需加载结果，可「加载更多」或「复制完整结果」。页面隐藏时暂停自动请求，暂停状态下仍可手动刷新。运行中读取的差异会标明可能过期，任务结束后自动更新一次；后续手动修改工作区仍需点击「刷新变更」。
 
+任务标题与完整描述独立保存。可填写最多 80 字符的简短标题；省略时使用完整的短句或项目标签，不再把长提示词直接当标题。详情中的「任务描述」可展开查看全文，运行中的任务也可读取；描述仅在展开时加载，不进入列表轮询。历史任务若只保存了标题片段，会明确标注描述不完整，无法恢复旧版未保存的文字。
+
 升级后请重启 MCP 服务和独立面板，并重新打开面板地址，使网页与接口版本一致。
 
 双击 `configure.cmd` 会在普通浏览器打开面板。也可手动启动：
@@ -85,13 +87,13 @@ Codex 调用 `get_panel(project_dir=项目绝对路径)`，再通过桌面应用
 
 在「连接设置」开启「自动选择适配模型」（默认关闭）。Codex 判断任务复杂度，服务根据当前代理的**实时模型列表**选型。
 
-- **Gemini**：按版本号、能力从低到高排序。版本号优先；同版本 Flash < Pro / Ultra / Argon。同版本同能力合为一组，按以下位置选择。
+- **Gemini**：简单任务先限定可用的基础档（优先 Flash），再选择该档低位；常规与复杂任务按完整的版本号、能力梯度排序。同版本 Flash < Pro / Ultra / Argon，同版本同能力合为一组。
 - **Claude**：Haiku 为快速、Sonnet 为均衡、Opus / Fable 为高能力。按下表选档，同档优先较新版本，同版本优先稳定版。
 - **DeepSeek**：在 Flash 型号中选择，同档优先稳定版和较新版本。
 
 | 任务复杂度 | 典型任务 | Gemini 实时梯度位置 | Claude 档位顺序 |
 | --- | --- | --- | --- |
-| `simple` | 文案、样式、局部小修、只读摘要 | 低位 | 轻量 → 快速 → 均衡 |
+| `simple` | 连通性检测、仅回复 OK、文案、局部小修 | 最低可用能力档内的低位 | 轻量 → 快速 → 均衡 |
 | `standard` | 常规功能、测试、排错 | 中位（向下取整） | 均衡 → 快速 → 高能力 |
 | `complex` | 架构、困难排错、大范围重构 | 高位 | 高能力 |
 
@@ -99,9 +101,13 @@ Gemini 组内优先稳定版、旗舰系列及已保存模型。
 
 候选限于当前代理可识别的通用编码型号，保留原始 ID。无法匹配或列表失败时沿用默认模型。规则按名称估算能力。
 
-手动指定模型优先，自动选型仅影响本次任务。对话中由 Codex 判断复杂度，面板新建任务时由用户选择；任务详情显示实际模型与选型原因。
+手动指定模型优先，自动选型仅影响本次任务。对话中由 Codex 判断复杂度，面板新建任务时由用户选择；任务详情显示实际模型与选型原因。只有用户为**本次任务**明确点名型号才算显式覆盖；提及代理、「这三个模型」、上一任务使用的型号或已保存默认值均不能作为覆盖依据。
 
-MCP 调用：`get_configuration` 返回 `model_selection_policy`，`list_models` 返回名称分类。自动选型时向 `submit_task` 传入 `task_complexity` 并省略 `model`；手动指定时传入完整 `model`。
+MCP 调用：`get_configuration` 返回 `model_selection_policy`，`list_models` 返回名称分类。自动选型时向 `submit_task` 传入 `task_complexity` 并省略 `model`；用户明确指定时传入完整 `model`，并用 `model_override_reason` 引用用户指定型号的原话依据（最多 300 字符）。仅传 `model` 会被拒绝，避免复制默认配置意外绕过选型；面板手动选型会自动记录其来源。
+
+纯原生 SDK 连通性检测使用 `task_kind=connectivity`、`mode=review`，省略 `model`。服务将复杂度固定为 `simple`，优先基础模型（Gemini Flash、Claude Haiku、DeepSeek Flash）；仍保留用户明确指定型号的优先权。自动选型关闭时继续使用默认模型；模型目录获取失败或缺少可识别候选时，会显示回退原因。排查连通性故障、审查代码等实际工作应使用 `general`，不会因为提示词包含「OK」就被降档。
+
+`test_connection` 和连接设置中的「测试连接」是直接 HTTP 协议探测，使用所选默认型号；要求官方客户端 UA 或验证原生 SDK 链路时，应通过上述 `submit_task` 连通性任务。重新加载 MCP 服务后，新参数及调用约束才会提供给客户端。
 
 ### 自定义策略
 
@@ -170,7 +176,7 @@ git -C <worktree路径> status --short
 | `get_changes(job_id)` | 读取工作区差异和新增文件名 |
 | `cancel_job(job_id)` | 终止本机工作进程树，保留文件修改 |
 
-`submit_task` 参数包括 `task`、绝对路径 `project_dir`、`backend=gemini|claude|deepseek`、`mode=review|edit`、可选 `model`、可选 `task_complexity=simple|standard|complex`、`workspace_mode=worktree|direct`、`timeout_seconds`。默认 Gemini、review、worktree，超时 600 秒（可设 10–1800 秒）。
+`submit_task` 参数包括完整描述 `task`、可选短标题 `title`、绝对路径 `project_dir`、`backend=gemini|claude|deepseek`、`mode=review|edit`、`task_kind=general|connectivity`、可选 `model`（须配合 `model_override_reason`）、可选 `task_complexity=simple|standard|complex`、`workspace_mode=worktree|direct`、`timeout_seconds`。默认 Gemini、review、general、worktree，超时 600 秒（可设 10–1800 秒）。`get_job` 默认返回完整脱敏任务描述；轮询状态或结果分页时可传 `include_description=false` 减少重复传输。
 
 ## 凭据与本地数据
 

@@ -5,12 +5,12 @@ import re
 import unicodedata
 
 COMPLEXITIES = {
-    "simple": "边界清楚的小改动：文案、样式、格式、局部且已知原因的修复或只读摘要。",
+    "simple": "纯连通性检测、仅回复 OK、短文本确认；或边界清楚的文案、样式、格式、局部小修、只读摘要。",
     "standard": "范围明确的常规开发：关联文件内的功能、测试和排错，需要一定工具调用。",
     "complex": "架构或大范围重构、难复现问题、安全/权限/并发/数据迁移，或存在明显不确定性。",
 }
 TIER_LABELS = {"light": "轻量", "fast": "快速", "balanced": "均衡", "strong": "高能力", "unknown": "未知"}
-STRATEGY = "model-name-v3"
+STRATEGY = "model-name-v4"
 # Match name tokens in order. Gemini Flash Lite is part of the Flash/fast tier.
 NAME_RULES = {
     "gemini": (("flash", "fast"), ("argon", "strong"), ("ultra", "strong"), ("pro", "strong")),
@@ -66,6 +66,11 @@ def policy(enabled: bool, backend: str = "gemini") -> dict:
             "reload": "修改项目根目录的策略文件后，重新加载 MCP 服务并重启面板。",
         },
         "task_complexities": COMPLEXITIES,
+        "connectivity": {
+            "task_kind": "connectivity", "task_complexity": "simple", "mode": "review",
+            "instruction": "纯原生 SDK 连通性检测或仅回复 OK 时设置 task_kind=connectivity，省略 model。"
+                           "服务固定为 simple，优先基础档。诊断故障、审查代码等实际工作仍用 general。",
+        },
         "name_rules": {backend: [{"name_contains": cue, "tier": tier} for cue, tier in rules]
                        for backend, rules in NAME_RULES.items()},
         "tier_order": PREFERENCES[backend],
@@ -74,8 +79,12 @@ def policy(enabled: bool, backend: str = "gemini") -> dict:
         "rank_tiers": TIER_ORDER,
         "rank_positions": COMPLEXITY_POSITIONS if backend in VERSION_FIRST else {},
         "instructions": [
-            "明确指定模型时传完整 model；否则 enabled=true 时按任务范围、风险和不确定性判断"
+            "仅当用户为本次任务明确指定型号时传完整 model，并用 model_override_reason 记录用户原话依据；"
+            "仅提及代理、这三个模型、上次使用的型号或已保存默认值，都不等于明确指定本次型号。"
+            "否则 enabled=true 时按任务范围、风险和不确定性判断"
             " task_complexity=simple/standard/complex，并省略 model；关闭时使用默认模型。",
+            "纯连通性检测、仅回复 OK 属于 simple；设置 task_kind=connectivity 可由服务固定此档。"
+            "simple 优先可识别候选中的最低能力档，再按该代理的版本规则排序。",
             "候选来自当前 backend 的实时列表，仅识别通用编码型号，保留完整原始 ID。",
             "version_first=true：按版本号、rank_tiers 从低到高分组，保留各版本。"
             "有可解析版本时采用这些候选；全部无版本时按能力分组。"
@@ -148,6 +157,11 @@ def choose_model(models: list[str], backend: str, default: str, complexity: str)
     candidates = [item for item in catalog(models, backend) if item["eligible"]]
     selection_note = ""
     rank_info = {}
+    if complexity == "simple" and candidates:
+        # Do not let an older flagship outrank an available basic model on a trivial task.
+        tier = min((item["tier"] for item in candidates), key=TIER_ORDER.index)
+        candidates = [item for item in candidates if item["tier"] == tier]
+        selection_note = f"优先可用的{TIER_LABELS[tier]}档；"
     if backend in VERSION_FIRST and candidates:
         versioned = [item for item in candidates if _version(item["model"]) != (0, 0, 0)]
         candidates = versioned or candidates
@@ -159,7 +173,7 @@ def choose_model(models: list[str], backend: str, default: str, complexity: str)
         index = int((len(ranks) - 1) * COMPLEXITY_POSITIONS[complexity])
         pools = [[item for item in candidates if rank(item) == ranks[index]]]
         rank_info = {"rank": index + 1, "rank_count": len(ranks)}
-        selection_note = f"按版本号、能力排序，选择实时梯度第 {index + 1}/{len(ranks)} 组；"
+        selection_note += f"按版本号、能力排序，选择实时梯度第 {index + 1}/{len(ranks)} 组；"
     else:
         pools = [[item for item in candidates if item["tier"] == tier]
                  for tier in PREFERENCES[backend][complexity]]

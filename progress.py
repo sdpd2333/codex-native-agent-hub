@@ -15,7 +15,7 @@ import common
 from events import read_activity
 
 JOB_ID = re.compile(r"[0-9a-f]{16}\Z")
-PUBLIC_FIELDS = ("job_id", "title", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "status", "started_at",
+PUBLIC_FIELDS = ("job_id", "title", "task_description", "task_kind", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "status", "started_at",
                  "finished_at", "result", "error", "_pid", "_control_url")
 TOOL_LABELS = {
     "view_file": "读取文件", "list_dir": "浏览目录", "search_dir": "搜索目录",
@@ -29,6 +29,24 @@ FINAL_LABELS = {"completed": "任务完成", "failed": "任务失败", "timed_ou
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def task_title(description: str, mode: str = "review", project_dir: str = "") -> str:
+    """Use a complete short clause, or a neutral label; never truncate the task itself."""
+    clause = re.split(r"[\r\n。！？!?；;]", description.strip(), maxsplit=1)[0].strip(" #*-\t")
+    if 0 < len(clause) <= 60:
+        return clause
+    label = "编辑任务" if mode == "edit" else "只读审查"
+    project = Path(project_dir).name
+    return f"{label} · {project}" if project and len(project) <= 40 else label
+
+
+def display_title(job: dict) -> str:
+    # Older releases stored only a (sometimes truncated) prompt prefix as the title.
+    # Keep that original record intact; expose it as incomplete description in get_job.
+    if "task_description" in job and job.get("title"):
+        return job["title"]
+    return task_title(str(job.get("title", "")), job.get("mode", "review"), job.get("project_dir", ""))
 
 
 def job_dir(job_id: str) -> Path:
@@ -195,9 +213,9 @@ def _snapshot(job: dict, *, include_result: bool = True) -> dict:
         status = "interrupted"
     if status != "running":
         activity["phase"] = FINAL_LABELS.get(status, status)
-    data = {key: job[key] for key in ("job_id", "title", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error")
+    data = {key: job[key] for key in ("job_id", "task_kind", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error")
             if key in job}
-    data.update(status=status, project_name=Path(job.get("project_dir", "")).name,
+    data.update(title=display_title(job), status=status, project_name=Path(job.get("project_dir", "")).name,
                 progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")))
     text = str(job.get("result", ""))
     data["result_chars"] = len(text)

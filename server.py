@@ -81,7 +81,12 @@ mcp = FastMCP("native-agent-hub", lifespan=lifespan, instructions=
     "Delegate tasks to Gemini/Antigravity, Claude/Claude Code or DeepSeek/dsh using their native SDKs. "
     "Use get_configuration first; the user selects models and enters credentials in get_panel's local UI. "
     "Follow model_selection_policy for the chosen backend. If the user explicitly names a model, pass its exact ID "
-    "as model. Otherwise, when auto_select_model is true, judge task_complexity as simple/standard/complex using "
+    "as model AND quote the user's model instruction in model_override_reason. Naming providers, 'these three models', "
+    "a previous task's model or a saved default is NOT an explicit model override. For pure connectivity/OK-only checks "
+    "use task_kind=connectivity and omit model; the server fixes complexity to simple. Use submit_task for native SDK "
+    "connectivity (including official client User-Agent requirements); test_connection is a direct HTTP probe. "
+    "Provide a concise title separately from the full task. Otherwise, when auto_select_model is true, judge "
+    "task_complexity as simple/standard/complex using "
     "the policy and submit it WITHOUT model; the server picks an exact live ID by model-name hints. When disabled, "
     "use the saved default unless the user explicitly requests another model. Never call select_model for automatic "
     "or one-task choices. Unknown names and catalog failures fall back to the saved default. "
@@ -186,14 +191,17 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
         return await submit_task(payload.get("task"), payload.get("project_dir"), backend=backend,
             mode=payload.get("mode", "review"), model=payload.get("model") or None,
             timeout_seconds=payload.get("timeout_seconds", 600), workspace_mode=payload.get("workspace_mode", "worktree"),
-            task_complexity=payload.get("task_complexity"))
+            task_complexity=payload.get("task_complexity"), title=payload.get("title"),
+            task_kind=payload.get("task_kind", "general"),
+            model_override_reason="用户在新建任务面板中手动选择此型号。" if payload.get("model") else None)
     if action == "cancel":
         return await cancel_job(str(payload.get("job_id", "")))
     if action == "changes":
         return await get_changes(str(payload.get("job_id", "")))
     if action == "job":
         return await get_job(str(payload.get("job_id", "")), offset=payload.get("offset", 0),
-                             max_chars=payload.get("max_chars", 20000))
+                             max_chars=payload.get("max_chars", 20000),
+                             include_description=payload.get("include_description", True))
     raise common.RelayError("接口不存在。")
 
 
@@ -226,7 +234,10 @@ async def select_model(model: str, backend: Literal["gemini", "claude", "deepsee
 
 @mcp.tool(annotations=NETWORK_READ)
 async def test_connection(backend: Literal["gemini", "claude", "deepseek"] = "gemini") -> dict:
-    """Send one small native generation request using the saved profile (uses provider quota)."""
+    """Direct HTTP generation probe using the saved model, not the official SDK client/UA.
+
+    For native SDK connectivity use submit_task(task_kind="connectivity") without model.
+    """
     settings = common.load_settings(backend)
     if not settings["model"]:
         raise common.RelayError("请先在面板选择并保存模型。")
@@ -297,13 +308,20 @@ async def execute(job: dict, task: str, timeout_seconds: int, profile: dict, key
 async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "claude", "deepseek"] = "gemini",
                       mode: Literal["review", "edit"] = "review", model: str | None = None,
                       timeout_seconds: int = 600, workspace_mode: Literal["worktree", "direct"] = "worktree",
-                      task_complexity: Literal["simple", "standard", "complex"] | None = None) -> dict:
+                      task_complexity: Literal["simple", "standard", "complex"] | None = None,
+                      title: str | None = None, task_kind: Literal["general", "connectivity"] = "general",
+                      model_override_reason: str | None = None) -> dict:
     """Delegate through a native runtime; return a job ID immediately. Poll get_job for results.
 
     Review only exposes read tools. Edit permits project changes and commands and defaults to a
     separate Git worktree (requires a clean committed source repository). Direct explicitly edits
     the given directory. Edits are kept for review and never automatically merged or discarded.
 
+    Supply a short title (up to 80 characters); task retains the full description separately.
+    Pure connectivity/OK-only checks use task_kind=connectivity, mode=review and omit model.
+    This fixes complexity to simple; actual debugging/review work uses task_kind=general.
+    A model override requires model_override_reason quoting this task's explicit user model request.
+    A provider name, saved default, previous task or "these three models" is not such a request.
     Explicit user model overrides win. Otherwise, when auto_select_model is enabled, Codex must
     judge task_complexity from model_selection_policy and omit model. The server selects from
     live IDs; saved defaults and reasoning effort stay unchanged. Disabled means use the default.
@@ -322,6 +340,22 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
         raise common.RelayError("timeout_seconds 必须为 10 到 1800 之间的整数。")
     if task_complexity is not None and (not isinstance(task_complexity, str) or task_complexity not in model_selection.COMPLEXITIES):
         raise common.RelayError("task_complexity 必须为 simple、standard 或 complex。")
+    if title is not None and (not isinstance(title, str) or len(title) > 80):
+        raise common.RelayError("title 须为不超过 80 字符的简短标题；完整任务描述请放在 task。")
+    if task_kind not in ("general", "connectivity"):
+        raise common.RelayError("task_kind 必须为 general 或 connectivity。")
+    if task_kind == "connectivity":
+        if mode != "review":
+            raise common.RelayError("纯连通性检测须使用 mode=review；实际修改或排错请使用 task_kind=general。")
+        task_complexity = "simple"
+    if model is not None:
+        if (not isinstance(model_override_reason, str) or not model_override_reason.strip()
+                or len(model_override_reason) > 300):
+            raise common.RelayError("显式 model 须同时提供 model_override_reason（300 字符内），说明用户为本次任务指定型号的原话依据。"
+                                    "不要复制默认模型或沿用上次型号；未明确指定时请省略 model，由自动选型处理。"
+                                    "纯连通性检测请传 task_kind=connectivity。")
+    elif model_override_reason is not None:
+        raise common.RelayError("model_override_reason 仅用于用户明确指定 model 的本次覆盖。")
     with common.configuration_lock():
         settings = common.load_settings(backend)
         selected = settings["model"] if model is None else model
@@ -334,6 +368,9 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     selection = {"model": profile["model"], "mode": "explicit" if model is not None else "default",
                  "default_model": settings["model"],
                  "reason": "本次明确指定模型。" if model is not None else "自动选型已关闭，使用保存的默认模型。"}
+    if model is not None:
+        selection["override_reason"] = common.redact(model_override_reason.strip(), key)
+        selection["reason"] = "用户指定型号：" + selection["override_reason"]
     if model is None and settings["auto_select_model"]:
         if task_complexity is None:
             raise common.RelayError("自动选型已开启：请由 Codex 判断任务复杂度并传入 task_complexity=simple/standard/complex。"
@@ -358,33 +395,47 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
                     break
     job_id = uuid.uuid4().hex[:16]
     panel = ensure_panel()
+    description = common.redact(task, key)
+    short_title = " ".join(title.split()) if title else ""
     job = {"job_id": job_id, "status": "running", "backend": backend, "runtime": common.PROVIDERS[backend]["runtime"],
            "model": profile["model"], "mode": mode, "project_dir": str(project.resolve()), "started_at": now(),
-           "model_selection": selection,
-           "title": common.redact(task.strip().splitlines()[0], key),
+           "model_selection": selection, "task_kind": task_kind,
+           "title": common.redact(short_title, key) if short_title else (
+               "原生 SDK 连通性检测" if task_kind == "connectivity" else progress.task_title(description, mode, str(project))),
+           "task_description": description,
            "_pid": os.getpid(), "_control_url": panel.url}
     JOBS[job_id] = job
     progress.save_job(job)
     # Profile and key are immutable per job and never included in persisted job metadata.
     job["future"] = asyncio.create_task(execute(job, task, timeout_seconds, profile.copy(), key, workspace_mode))
-    return {name: value for name, value in job.items() if name != "future" and not name.startswith("_")} | {
+    return {name: value for name, value in job.items() if name not in ("future", "task_description") and not name.startswith("_")} | {
         "dashboard_url": panel.url}
 
 
 @mcp.tool(annotations=READ)
-async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars: int = 20000) -> dict:
-    """Read status, live metadata and paginated result; optionally wait up to 20 seconds."""
+async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars: int = 20000,
+                  include_description: bool = True) -> dict:
+    """Read status, full task description and paginated result; optionally wait up to 20 seconds.
+
+    Use include_description=false for result paging/status polling. Legacy description prefixes
+    are marked task_description_complete=false; their lost text cannot be recovered here.
+    """
     job = JOBS.get(job_id) or progress.load_job(job_id)
     if job is None:
         raise common.RelayError("任务不存在。")
     if (any(isinstance(value, bool) or not isinstance(value, int) for value in (wait_seconds, offset, max_chars))
-            or not 0 <= wait_seconds <= 20 or offset < 0 or not 100 <= max_chars <= 50000):
+            or not 0 <= wait_seconds <= 20 or offset < 0 or not 100 <= max_chars <= 50000
+            or not isinstance(include_description, bool)):
         raise common.RelayError("查询参数超出范围。")
     if wait_seconds and job["status"] == "running" and "future" in job:
         await asyncio.wait({job["future"]}, timeout=wait_seconds)
-    result = {name: value for name, value in job.items() if name not in ("future", "process", "result") and not name.startswith("_")}
+    result = {name: value for name, value in job.items()
+              if name not in ("future", "process", "result", "task_description") and not name.startswith("_")}
     activity = progress.snapshot(job, include_result=False)
     result.update(activity)
+    if include_description:
+        result.update(task_description=job.get("task_description", job.get("title", "")),
+                      task_description_complete="task_description" in job)
     if "result" in job:
         full = job["result"]
         result.update(result=full[offset:offset + max_chars], offset=offset, total_chars=len(full),

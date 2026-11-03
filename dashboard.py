@@ -79,7 +79,9 @@ class PanelServer:
                         return
                     try:
                         length = int(self.headers.get("Content-Length", "0"))
-                        if not 0 < length <= 256 * 1024:
+                        # A 100,000-character task can exceed 256 KiB in UTF-8 or escaped JSON.
+                        limit = 2 * 1024 * 1024 if action == "api/tasks" else 256 * 1024
+                        if not 0 < length <= limit:
                             self.reply(413, {"error": "请求大小超出范围。"})
                             return
                         payload = json.loads(self.rfile.read(length))

@@ -70,6 +70,7 @@ function fixture() {
     },
     jobs: [job("a", "completed"), job("b")],
     results: {},
+    descriptions: {},
     calls: [],
     handlers: {},
     clipboard: "",
@@ -79,6 +80,11 @@ function fixture() {
   state.jobs[0].result_chars = Array.from(
     state.results[state.jobs[0].job_id],
   ).length;
+  for (const item of state.jobs)
+    state.descriptions[item.job_id] = {
+      text: `完整任务描述 ${item.job_id}\n检查交互、布局与可访问性。`,
+      complete: true,
+    };
   state.api = async (action, payload) => {
     state.calls.push({ action, payload: clone(payload || {}) });
     if (state.handlers[action]) return state.handlers[action](payload);
@@ -120,6 +126,14 @@ function fixture() {
         max = payload.max_chars || 20000;
       return {
         ...clone(summary),
+        ...(payload.include_description === false
+          ? {}
+          : {
+              task_description:
+                state.descriptions[payload.job_id]?.text || summary.title,
+              task_description_complete:
+                state.descriptions[payload.job_id]?.complete ?? false,
+            }),
         result: chars.slice(offset, offset + max).join(""),
         offset,
         total_chars: chars.length,

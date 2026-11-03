@@ -115,14 +115,18 @@ class JobIsolationTests(unittest.IsolatedAsyncioTestCase):
             commands.append((args, kwargs))
             return Process()
         with patch.object(asyncio, 'create_subprocess_exec', side_effect=create):
-            title = 'Review ' + 'the project source and security boundaries ' * 8
-            job = await server.submit_task(title + '\nDetailed instructions.', str(APP), backend='claude')
+            title = 'Review source and security boundaries'
+            description = 'Review ' + 'the project source and security boundaries ' * 8 + '\nDetailed instructions.'
+            job = await server.submit_task(description, str(APP), backend='claude', title=title)
             common.save_settings('https://changed.example.com', 'changed-model', 'claude')
             os.environ['AGENT_HUB_CLAUDE_API_KEY'] = 'changed-fixture'
             result = await server.get_job(job['job_id'], wait_seconds=2)
         self.assertEqual(result['status'], 'completed')
         self.assertEqual(result['title'], title)
         self.assertEqual(progress.load_job(job['job_id'])['title'], title)
+        self.assertEqual(result['task_description'], description)
+        self.assertEqual(progress.load_job(job['job_id'])['task_description'], description)
+        self.assertEqual(payloads[0]['task'], description)
         self.assertEqual(payloads[0]['profile'], {'base_url': 'https://original.example.com', 'model': 'original-model', 'effort': 'high'})
         self.assertEqual(payloads[0]['key'], 'original-fixture')
         self.assertNotIn('original-fixture', str(commands))

@@ -294,6 +294,62 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         for invalid in ({"offset": True}, {"offset": -1}, {"offset": "0"}, {"max_chars": None}, {"max_chars": 50001}):
             self.assertEqual((await self.request("api/job", "POST", {"job_id": job["job_id"], **invalid}))[0], 400)
 
+    async def test_short_title_and_full_redacted_description_survive_restart_without_bloating_polling(self):
+        common.save_key("description-fixture-secret")
+        common.save_settings("https://relay.example.com", "gemini-alias")
+        description = "完整要求🙂\n" * 16000 + "尾部验证 description-fixture-secret"
+        title = "审查前端交互与可访问性"
+        release = asyncio.Event()
+
+        async def finish(job, *_args):
+            await release.wait()
+            job.update(status="completed", result="OK")
+            progress.save_job(job)
+
+        with patch.object(server, "execute", new=finish):
+            status, body, _ = await self.request("api/tasks", "POST", {
+                "task": description, "title": title, "project_dir": str(APP)})
+            self.assertEqual(status, 200)
+            submitted = json.loads(body)
+            self.assertEqual(submitted["title"], title)
+            self.assertNotIn("task_description", submitted)
+            _, body, _ = await self.request("api/jobs")
+            self.assertNotIn("task_description", json.loads(body)["jobs"][0])
+            self.assertLess(len(body), 3000)
+            _, body, _ = await self.request("api/job", "POST", {"job_id": submitted["job_id"]})
+            detail = json.loads(body)
+            self.assertEqual(detail["status"], "running")
+            self.assertEqual(detail["task_description"], common.redact(description, "description-fixture-secret"))
+            self.assertTrue(detail["task_description_complete"])
+            self.assertNotIn(b"description-fixture-secret", body)
+            release.set()
+            await server.get_job(submitted["job_id"], wait_seconds=1)
+        server.JOBS.clear()
+        detail = await server.get_job(submitted["job_id"])
+        self.assertEqual(detail["title"], title)
+        self.assertIn("尾部验证", detail["task_description"])
+        _, body, _ = await self.request("api/job", "POST", {
+            "job_id": submitted["job_id"], "include_description": False})
+        self.assertNotIn("task_description", json.loads(body))
+        self.assertLess(len(body), 3000)
+
+    async def test_legacy_title_is_preserved_as_incomplete_description(self):
+        legacy = "审查 UI 交互。" + "历史截断内容" * 30
+        job = {"job_id": "d" * 16, "title": legacy, "status": "completed", "project_dir": str(APP)}
+        progress.save_job(job)
+        detail = await server.get_job(job["job_id"])
+        self.assertEqual(detail["title"], "审查 UI 交互")
+        self.assertEqual(detail["task_description"], legacy)
+        self.assertFalse(detail["task_description_complete"])
+        self.assertEqual(progress.load_job(job["job_id"])["title"], legacy)
+
+    async def test_title_fallback_does_not_cut_mid_sentence_and_validates_explicit_titles(self):
+        long_task = "A long uninterrupted task description " * 300
+        self.assertEqual(progress.task_title(long_task, "edit", str(APP)), "编辑任务 · " + APP.name)
+        for value in ("x" * 81, True, []):
+            with self.assertRaisesRegex(common.RelayError, 'title'):
+                await server.submit_task('review', str(APP), title=value)
+
 
 if __name__ == "__main__":
     unittest.main()

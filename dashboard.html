@@ -231,10 +231,7 @@
       .job-title {
         font-size: 13px;
         font-weight: 650;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
+        overflow-wrap: anywhere;
       }
       .job-meta {
         font-size: 11px;
@@ -301,6 +298,24 @@
       }
       .detail-top .badge {
         flex-shrink: 0;
+      }
+      .task-description summary {
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 650;
+        overflow-wrap: anywhere;
+      }
+      .task-description summary:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 4px;
+      }
+      .description-text {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font: inherit;
+        font-size: 13px;
+        line-height: 1.7;
+        margin: 14px 0 0;
       }
       .detail-meta {
         font-size: 11px;
@@ -780,6 +795,16 @@
               <p class="hint" id="task-profile"></p>
             </div>
             <div class="field">
+              <label for="task-kind">任务类型</label>
+              <select id="task-kind" aria-describedby="task-kind-hint">
+                <option value="general">常规任务</option>
+                <option value="connectivity">纯连通性检测 · 仅确认回复</option>
+              </select>
+              <p class="hint" id="task-kind-hint" hidden>
+                通过原生运行环境只读检测。自动选型开启时固定使用简单档，优先基础模型；关闭时使用默认模型。手动指定型号优先。
+              </p>
+            </div>
+            <div class="field">
               <div class="section-row">
                 <label for="task-model">本次模型</label>
                 <button id="task-fetch-models" class="btn small" type="button">
@@ -794,7 +819,7 @@
             <div class="field" id="task-complexity-field" hidden>
               <label for="task-complexity">任务复杂度</label
               ><select id="task-complexity">
-                <option value="simple">简单 · 文案、样式、局部小修</option>
+                <option value="simple">简单 · 连通性、文案、局部小修</option>
                 <option value="standard" selected>
                   常规 · 功能开发与一般排错
                 </option>
@@ -845,7 +870,19 @@
               </p>
             </div>
             <div class="field">
-              <label for="task-prompt">任务目标</label
+              <label for="task-title">简短标题（可选）</label>
+              <input
+                id="task-title"
+                maxlength="80"
+                placeholder="例如：审查前端交互与可访问性"
+                aria-describedby="task-title-hint"
+              />
+              <p class="hint" id="task-title-hint">
+                最多 80 字符。留空时生成简短标签，完整要求保存在下方任务描述中。
+              </p>
+            </div>
+            <div class="field">
+              <label for="task-prompt">完整任务描述</label
               ><textarea
                 id="task-prompt"
                 required

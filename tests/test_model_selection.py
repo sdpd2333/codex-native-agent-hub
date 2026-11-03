@@ -24,7 +24,7 @@ class NamePolicyTests(unittest.TestCase):
             'gemini', 'gemini-4-argon', 'simple')
         self.assertEqual(chosen['model'], 'models/gemini-3.8-flash')
         self.assertEqual(chosen['mode'], 'automatic')
-        self.assertEqual((chosen['rank'], chosen['rank_count']), (1, 3))
+        self.assertEqual((chosen['rank'], chosen['rank_count']), (1, 2))
         self.assertTrue(model_selection.describe_model('3.8flash', 'gemini')['eligible'])
         self.assertEqual(model_selection.describe_model('4argon', 'gemini')['tier'], 'strong')
 
@@ -109,7 +109,7 @@ class NamePolicyTests(unittest.TestCase):
 
     def test_gemini_handles_unversioned_aliases_without_inventing_versions(self):
         models = ['gemini-flash-latest', 'gemini-4-pro', 'gemini-5-flash-image']
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'simple')['model'], models[1])
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'simple')['model'], models[0])
         models = ['gemini-flash-latest', 'gemini-pro-latest']
         self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'simple')['model'], models[0])
         self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'complex')['model'], models[1])
@@ -146,6 +146,12 @@ class NamePolicyTests(unittest.TestCase):
             chosen = model_selection.choose_model(models, 'gemini', 'private-default', 'complex')
             self.assertEqual(chosen['model'], 'private-default')
             self.assertEqual(chosen['mode'], 'fallback')
+
+    def test_simple_prefers_basic_tier_over_an_older_flagship(self):
+        models = ['gemini-3-pro', 'gemini-4-flash', 'gemini-4-argon']
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[-1], 'simple')['model'], models[1])
+        # Actual complex work still follows the full capability ladder.
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'complex')['model'], models[-1])
 
     def test_catalog_ids_are_not_rewritten_and_namespace_numbers_are_not_versions(self):
         for model in (' gemini-3-flash', 'gemini-3-flash\n', 'gemini-flash-' + 'x' * 512):
@@ -244,10 +250,83 @@ class AutomaticSelectionTests(unittest.IsolatedAsyncioTestCase):
         for enabled in (False, True):
             common.save_settings('https://relay.example.com', 'gemini-4-argon', auto_select_model=enabled)
             with patch.object(common, 'fetch_models') as fetch:
-                job = await self.submit(model='my-explicit-alias')
+                job = await self.submit(model='my-explicit-alias', model_override_reason='用户要求本次使用 my-explicit-alias')
             self.assertEqual(job['model'], 'my-explicit-alias')
             self.assertEqual(job['model_selection']['mode'], 'explicit')
             fetch.assert_not_called()
+
+    async def test_copying_a_saved_model_cannot_silently_bypass_routing(self):
+        self.enable()
+        prompt = '这是原生 SDK 调用连通性测试。不要读取文件、运行命令、调用工具或修改文件。最终回复必须严格为两个大写英文字母：OK。'
+        with patch.object(common, 'fetch_models') as fetch:
+            with self.assertRaisesRegex(common.RelayError, 'model_override_reason'):
+                await server.submit_task(prompt, str(APP), model='gemini-4-argon')
+        fetch.assert_not_called()
+        self.assertFalse(server.JOBS)
+        for invalid in ('', ' ' * 10, True, 'x' * 301):
+            with self.assertRaisesRegex(common.RelayError, 'model_override_reason'):
+                await self.submit(model='gemini-4-argon', model_override_reason=invalid)
+        with self.assertRaisesRegex(common.RelayError, 'model_override_reason'):
+            await self.submit(model_override_reason='no model')
+
+    async def test_connectivity_uses_basic_models_for_all_backends_without_changing_defaults(self):
+        cases = [
+            ('gemini', 'gemini-4-argon', 'gemini-3.8-flash'),
+            ('claude', 'claude-sonnet-5-5', 'claude-haiku-4-5'),
+            ('deepseek', 'deepseek-v4-pro', 'deepseek-v4-flash'),
+        ]
+        for backend, saved, basic in cases:
+            self.enable(backend, saved)
+            for complexity in (None, 'complex'):
+                with patch.object(common, 'fetch_models', return_value=[saved, basic]):
+                    job = await self.submit(backend=backend, task_kind='connectivity', task_complexity=complexity)
+                self.assertEqual(job['model'], basic)
+                self.assertEqual(job['model_selection']['complexity'], 'simple')
+                self.assertEqual(job['task_kind'], 'connectivity')
+                self.assertEqual(job['title'], '原生 SDK 连通性检测')
+                self.assertEqual(self.payloads[-1]['model'], basic)
+                self.assertEqual(common.load_settings(backend)['model'], saved)
+
+    async def test_connectivity_honors_explicit_user_model_and_disabled_automation(self):
+        self.enable()
+        with patch.object(common, 'fetch_models') as fetch:
+            job = await self.submit(task_kind='connectivity', model='gemini-4-argon',
+                                    model_override_reason='用户要求测试 gemini-4-argon routing-fixture')
+        fetch.assert_not_called()
+        self.assertEqual(job['model_selection']['mode'], 'explicit')
+        self.assertNotIn('routing-fixture', json.dumps(progress.load_job(job['job_id'])))
+        common.save_settings('https://relay.example.com', 'gemini-4-argon', auto_select_model=False)
+        with patch.object(common, 'fetch_models') as fetch:
+            job = await self.submit(task_kind='connectivity')
+        fetch.assert_not_called()
+        self.assertEqual(job['model_selection']['mode'], 'default')
+
+    async def test_connectivity_cannot_be_an_edit_and_general_debugging_is_not_downgraded(self):
+        with self.assertRaisesRegex(common.RelayError, 'mode=review'):
+            await self.submit(task_kind='connectivity', mode='edit')
+        self.enable()
+        with patch.object(common, 'fetch_models', return_value=['gemini-3.8-flash', 'gemini-4-argon']):
+            job = await server.submit_task('Debug why the connectivity check never replies OK', str(APP),
+                                           task_complexity='complex')
+            job = await server.get_job(job['job_id'], wait_seconds=1)
+        self.assertEqual(job['model'], 'gemini-4-argon')
+        self.assertEqual(job['model_selection']['complexity'], 'complex')
+
+    async def test_panel_manual_model_is_explicit_but_automatic_connectivity_is_simple(self):
+        self.enable()
+        payload = {'task': 'Only reply OK', 'project_dir': str(APP), 'task_kind': 'connectivity',
+                   'task_complexity': 'complex', 'title': '检查连接'}
+        with patch.object(common, 'fetch_models', return_value=['gemini-3.8-flash', 'gemini-4-argon']):
+            job = await server.panel_dispatch('POST', 'tasks', payload)
+            job = await server.get_job(job['job_id'], wait_seconds=1)
+        self.assertEqual(job['model'], 'gemini-3.8-flash')
+        self.assertEqual(job['title'], payload['title'])
+        with patch.object(common, 'fetch_models') as fetch:
+            manual = await server.panel_dispatch('POST', 'tasks', {**payload, 'model': 'gemini-4-argon'})
+            await server.get_job(manual['job_id'], wait_seconds=1)
+        fetch.assert_not_called()
+        self.assertEqual(manual['model_selection']['mode'], 'explicit')
+        self.assertIn('手动选择', manual['model_selection']['override_reason'])
 
     async def test_enabled_requires_codex_judgment_before_network_or_job(self):
         self.enable()

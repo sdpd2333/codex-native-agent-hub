@@ -505,7 +505,9 @@
           : "可刷新当前代理的模型列表；选择仅影响本次任务。",
     );
     $("task-complexity-field").hidden =
-      !profile.auto_select_model || Boolean(select.value);
+      !profile.auto_select_model ||
+      Boolean(select.value) ||
+      $("task-kind").value === "connectivity";
   }
   async function loadTaskModels(force = false) {
     const b = $("task-backend").value,
@@ -573,6 +575,16 @@
       $("workspace-field").hidden =
         document.querySelector("[name=mode]:checked").value !== "edit";
     };
+  $("task-kind").onchange = () => {
+    const connectivity = $("task-kind").value === "connectivity";
+    $("task-kind-hint").hidden = !connectivity;
+    document.querySelector("[name=mode][value=edit]").disabled = connectivity;
+    if (connectivity) {
+      document.querySelector("[name=mode][value=review]").checked = true;
+      $("workspace-field").hidden = true;
+    }
+    taskProfile();
+  };
   $("task-form").onsubmit = async (event) => {
     event.preventDefault();
     if ($("submit").disabled) return;
@@ -592,13 +604,17 @@
         backend: b,
         project_dir: $("task-project").value.trim(),
         task: $("task-prompt").value,
+        title: $("task-title").value.trim() || null,
+        task_kind: $("task-kind").value,
         model: $("task-model").value,
         mode: document.querySelector("[name=mode]:checked").value,
         workspace_mode: $("task-workspace").value,
         timeout_seconds: Number($("task-timeout").value),
         task_complexity:
           config.profiles[b]?.auto_select_model && !$("task-model").value
-            ? $("task-complexity").value
+            ? $("task-kind").value === "connectivity"
+              ? "simple"
+              : $("task-complexity").value
             : null,
       });
       selected = data.job_id;
@@ -723,6 +739,7 @@
       changesError: "",
       autoDiffSignature: "",
       result: null,
+      description: { text: null, complete: true, pending: false, error: "" },
       copying: false,
       copyMessage: "",
     };
@@ -755,6 +772,22 @@
       cancel,
       operation,
     );
+    const description = el("details", "card task-description"),
+      descriptionText = el("pre", "description-text"),
+      descriptionNote = el("p", "hint"),
+      descriptionError = el("div", "alert error"),
+      descriptionRetry = button("重试读取描述", () => loadDescription(state));
+    descriptionError.setAttribute("role", "status");
+    description.append(
+      el("summary", "", "任务描述"),
+      descriptionNote,
+      descriptionText,
+      descriptionError,
+      descriptionRetry,
+    );
+    description.ontoggle = () => {
+      if (description.open) loadDescription(state);
+    };
     const error = el("div", "alert error"),
       workspace = el("div", "card"),
       workspaceRow = el("div", "section-row");
@@ -820,13 +853,18 @@
       more = button("加载更多", () => loadResult(state)),
       resultError = el("div", "alert error");
     resultCard.append(resultRow, result, resultHint, more, resultError);
-    root.append(top, error, workspace, activity, resultCard);
+    root.append(top, description, error, workspace, activity, resultCard);
     state.nodes = {
       root,
       title,
       badge,
       meta,
       selection,
+      description,
+      descriptionText,
+      descriptionNote,
+      descriptionError,
+      descriptionRetry,
       time: time.value,
       models: models.value,
       tools: tools.value,
@@ -921,7 +959,8 @@
       cache &&
       (cache.signature !== changeSignature(job) || job.status === "running");
     const freshness = stale
-      ? " · 预览可能已过期，请刷新。" + (job.status === "running" ? "任务结束后会自动更新一次。" : "")
+      ? " · 预览可能已过期，请刷新。" +
+        (job.status === "running" ? "任务结束后会自动更新一次。" : "")
       : "";
     text(
       n.diffNote,
@@ -957,6 +996,50 @@
   function resultSignature(job) {
     return JSON.stringify([job.status, job.finished_at, job.result_chars || 0]);
   }
+  async function loadDescription(state) {
+    const description = state.description;
+    if (description.pending || description.text !== null) return;
+    description.pending = true;
+    description.error = "";
+    renderCurrent(state);
+    try {
+      const data = await request("job", {
+        job_id: state.id,
+        max_chars: 100,
+        include_description: true,
+      });
+      if (
+        typeof data.task_description !== "string" ||
+        typeof data.task_description_complete !== "boolean"
+      )
+        throw new Error("任务描述响应无效，请重新加载服务后重试。");
+      description.text = data.task_description;
+      description.complete = data.task_description_complete;
+    } catch (error) {
+      description.error = error.message;
+    } finally {
+      description.pending = false;
+      renderCurrent(state);
+    }
+  }
+  function updateDescription(state) {
+    const n = state.nodes,
+      description = state.description;
+    text(n.descriptionText, description.text || "");
+    text(
+      n.descriptionNote,
+      description.pending
+        ? "正在读取任务描述…"
+        : description.text === null
+          ? "展开后读取任务描述。"
+          : description.complete
+            ? "完整任务描述（已脱敏）。"
+            : "历史任务未保存完整描述，以下仅为当时保留的片段，可能已被截断。",
+    );
+    text(n.descriptionError, description.error);
+    n.descriptionError.hidden = n.descriptionRetry.hidden = !description.error;
+    n.descriptionRetry.disabled = description.pending;
+  }
   async function loadResult(state) {
     const result = state.result;
     if (!result || result.next === null) return;
@@ -968,6 +1051,7 @@
           job_id: state.id,
           offset: result.next,
           max_chars: 20000,
+          include_description: false,
         });
         if (state.result !== result) return;
         if (
@@ -1179,6 +1263,7 @@
     );
     text(n.branch, job.workspace?.branch ? `分支 ${job.workspace.branch}` : "");
     updateChanges(state);
+    updateDescription(state);
     updateEvents(state);
     const signature = resultSignature(job);
     if (state.resultMark !== signature) {
@@ -1239,6 +1324,7 @@
               !state.cancelPending &&
               !state.changesPending &&
               !state.copying &&
+              !state.description.pending &&
               !state.result?.promise
             )
               states.delete(id);
