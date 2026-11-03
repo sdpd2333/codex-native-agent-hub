@@ -10,9 +10,9 @@
         --bg: #f6f7f9;
         --surface: #fff;
         --ink: #172533;
-        --muted: #6e7a88;
+        --muted: #5f6b78;
         --line: #e3e8ed;
-        --accent: #087f6c;
+        --accent: #076f5f;
         --tint: #eaf7f2;
         --danger: #b43c40;
         --shadow: 0 3px 14px #17253306;
@@ -188,6 +188,32 @@
         display: flex;
         flex-direction: column;
         gap: 9px;
+      }
+      .jobs > .empty {
+        grid-column: 1 / -1;
+      }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+      fieldset.field {
+        border: 0;
+        padding: 0;
+        min-width: 0;
+      }
+      legend {
+        font-size: 12px;
+        font-weight: 600;
+        margin-bottom: 6px;
+      }
+      .diff.nowrap {
+        white-space: pre;
+        overflow-wrap: normal;
       }
       .job {
         border: 1px solid var(--line);
@@ -387,7 +413,7 @@
       }
       input::placeholder,
       textarea::placeholder {
-        color: #9aa3ad;
+        color: var(--muted);
       }
       .hint {
         font-size: 11px;
@@ -549,6 +575,7 @@
         align-items: center;
         gap: 10px;
         margin-bottom: 14px;
+        flex-wrap: wrap;
       }
       .section-row h3 {
         margin: 0;
@@ -562,7 +589,7 @@
       }
       .footer {
         font-size: 10px;
-        color: #8a949f;
+        color: var(--muted);
         text-align: center;
         padding: 10px 0;
       }
@@ -690,6 +717,7 @@
         ><button
           type="button"
           id="tab-task"
+          tabindex="-1"
           role="tab"
           aria-selected="false"
           aria-controls="task"
@@ -698,6 +726,7 @@
         ><button
           type="button"
           id="tab-settings"
+          tabindex="-1"
           role="tab"
           aria-selected="false"
           aria-controls="settings"
@@ -712,7 +741,7 @@
           <input
             type="search"
             id="search"
-            placeholder="搜索任务、代理或模型"
+            placeholder="搜索任务、项目、代理或模型"
             aria-label="搜索任务"
           /><span class="sync" id="sync"><span class="dot"></span>正在连接</span
           ><button class="btn small" id="refresh" type="button">刷新</button
@@ -720,7 +749,13 @@
         </div>
         <div class="monitor">
           <div class="jobs" id="jobs" aria-label="任务列表"></div>
-          <div id="detail" aria-live="polite">
+          <div
+            id="monitor-status"
+            class="sr-only"
+            role="status"
+            aria-atomic="true"
+          ></div>
+          <div id="detail">
             <div class="empty">
               <strong>在这里查看代理的任务进展</strong
               >选择任务以查看阶段、工具活动和执行结果。
@@ -781,8 +816,8 @@
               />
               <p class="hint">使用本机现有目录的绝对路径。</p>
             </div>
-            <div class="field">
-              <label>任务权限</label>
+            <fieldset class="field">
+              <legend>任务权限</legend>
               <div class="choices">
                 <label class="choice"
                   ><input
@@ -797,7 +832,7 @@
                   ></label
                 >
               </div>
-            </div>
+            </fieldset>
             <div class="field" id="workspace-field" hidden>
               <label for="task-workspace">编辑工作区</label
               ><select id="task-workspace">
@@ -952,6 +987,16 @@
               </details>
             </div>
             <div class="alert" id="settings-alert" role="status" hidden></div>
+            <p class="hint" id="draft-status" hidden></p>
+            <div
+              class="alert error"
+              id="settings-conflict"
+              role="status"
+              hidden
+            ></div>
+            <button class="btn" id="reload-config" type="button" hidden>
+              重新加载已保存配置（清除本地草稿）
+            </button>
             <div class="row">
               <button class="btn" id="test" type="button">测试基础生成</button
               ><button class="btn primary" id="save" type="button">
@@ -959,7 +1004,7 @@
               </button>
             </div>
             <p class="hint">
-              测试会发送一条简短请求并使用接口额度。之后可提交只读任务，验证流式响应和原生工具调用。
+              测试会使用少量接口额度，但不会保存配置。先保存，再提交只读任务验证流式响应和原生工具调用。
             </p>
             <div class="runtime" id="runtime"></div>
           </div>
@@ -969,729 +1014,6 @@
         Native tools. Separate workspaces. One place to follow.
       </div>
     </main>
-    <script>
-      (() => {
-        "use strict";
-        const $ = (id) => document.getElementById(id);
-        const names = {
-          gemini: "Gemini",
-          claude: "Claude",
-          deepseek: "DeepSeek",
-        };
-        const statuses = {
-          running: "运行中",
-          completed: "已完成",
-          failed: "失败",
-          timed_out: "超时",
-          cancelled: "已取消",
-          interrupted: "已中断",
-        };
-        const protocols = {
-          gemini:
-            "需要 Gemini 原生接口 /v1beta/models/*，以及流式响应与工具调用。",
-          claude:
-            "需要 Anthropic Messages /v1/messages，以及流式响应与 Claude Code 工具调用。",
-          deepseek:
-            "此版本 dsh 使用 DeepSeek Messages /v1/messages。仅支持 Chat Completions 的中转路径无法运行。",
-        };
-        let config = { profiles: {}, runtimes: {} },
-          backend = "gemini",
-          jobs = [],
-          selected = null;
-        let busy = false,
-          fetching = false,
-          paused = false,
-          timer = null,
-          fingerprint = "",
-          activeTab = "monitor";
-        const modelLists = {},
-          taskModelLists = {},
-          taskModelRequests = new Set(),
-          changeCache = new Map();
-        function el(tag, cls, text) {
-          const n = document.createElement(tag);
-          if (cls) n.className = cls;
-          if (text !== undefined) n.textContent = String(text);
-          return n;
-        }
-        function alert(id, text, type = "") {
-          const n = $(id);
-          n.textContent = text;
-          n.className = "alert " + type;
-          n.hidden = !text;
-        }
-        function tab(id) {
-          activeTab = id;
-          for (const t of ["monitor", "task", "settings"]) {
-            $(t).hidden = t !== id;
-            $("tab-" + t).setAttribute("aria-selected", String(t === id));
-          }
-          if (id === "monitor") render();
-          if (id === "task") {
-            taskProfile();
-            loadTaskModels();
-          }
-        }
-        for (const t of ["monitor", "task", "settings"])
-          $("tab-" + t).onclick = () => tab(t);
-        $("connection").onclick = () => tab("settings");
-        function duration(job) {
-          const start = Date.parse(job.started_at),
-            end = job.finished_at ? Date.parse(job.finished_at) : Date.now();
-          if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
-          const s = Math.max(0, Math.floor((end - start) / 1000));
-          return s >= 60 ? `${Math.floor(s / 60)}分 ${s % 60}秒` : `${s}秒`;
-        }
-        function stamp(s) {
-          const d = new Date(s);
-          return s && !isNaN(d)
-            ? d.toLocaleTimeString("zh-CN", { hour12: false })
-            : "—";
-        }
-        async function request(action, payload) {
-          const r = await fetch(new URL("api/" + action, location.href), {
-            cache: "no-store",
-            ...(payload === undefined
-              ? {}
-              : {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "X-Agent-Hub": "1",
-                  },
-                  body: JSON.stringify(payload),
-                }),
-          });
-          const data = await r.json();
-          if (!r.ok) throw new Error(data.error || `请求失败 (${r.status})`);
-          return data;
-        }
-        function updateSummary() {
-          const ready = Object.values(config.profiles).filter(
-            (p) => p.ready,
-          ).length;
-          $("connection").textContent = `${ready} / 3 已配置`;
-          $("connection").className = "connection" + (ready ? " ready" : "");
-          taskProfile();
-        }
-        function taskProfile() {
-          const b = $("task-backend").value,
-            p = config.profiles[b] || {},
-            cached = taskModelLists[b],
-            cacheMatches = Boolean(cached && cached.base_url === p.base_url),
-            models = cacheMatches ? cached.models : [],
-            select = $("task-model"),
-            previous =
-              select.dataset.backend === b &&
-              select.dataset.baseUrl === p.base_url
-                ? select.value
-                : "",
-            loading = taskModelRequests.has(JSON.stringify([b, p.base_url])),
-            ids = [
-              ...new Set([...(models || []), ...(p.model ? [p.model] : [])]),
-            ];
-          $("task-profile").textContent = p.ready
-            ? `已配置 · ${p.runtime} · 默认模型 ${p.model} · 自动选型${p.auto_select_model ? "已开启" : "已关闭"}`
-            : `${names[b]} 尚未配置，请先打开连接设置。`;
-          const fallback = el(
-            "option",
-            "",
-            p.auto_select_model
-              ? "自动选择 · 按任务复杂度匹配"
-              : p.model
-                ? `默认模型 · ${p.model}`
-                : "使用默认模型",
-          );
-          fallback.value = "";
-          select.replaceChildren(
-            fallback,
-            ...ids.map((model) => {
-              const option = el("option", "", model);
-              option.value = model;
-              return option;
-            }),
-          );
-          select.value = ids.includes(previous) ? previous : "";
-          select.dataset.backend = b;
-          select.dataset.baseUrl = p.base_url || "";
-          $("task-fetch-models").disabled = !p.ready || loading;
-          $("task-fetch-models").textContent = loading ? "拉取中…" : "刷新模型";
-          $("task-model-hint").textContent = loading
-            ? "正在拉取当前代理的模型…"
-            : cacheMatches
-              ? `已拉取 ${models.length} 个模型；选择仅影响本次任务。`
-              : "可刷新当前代理的模型列表；选择仅影响本次任务。";
-          $("task-complexity-field").hidden =
-            !p.auto_select_model || Boolean(select.value);
-        }
-        async function loadTaskModels(force = false) {
-          const b = $("task-backend").value,
-            p = config.profiles[b] || {},
-            requestKey = JSON.stringify([b, p.base_url]);
-          if (
-            !p.ready ||
-            taskModelRequests.has(requestKey) ||
-            (!force && taskModelLists[b]?.base_url === p.base_url)
-          )
-            return;
-          taskModelRequests.add(requestKey);
-          alert("task-alert", "");
-          taskProfile();
-          try {
-            const data = await request("models", {
-              backend: b,
-              base_url: p.base_url,
-            });
-            taskModelLists[b] = {
-              base_url: data.base_url,
-              models: Array.isArray(data.models) ? data.models : [],
-            };
-          } catch (error) {
-            if (
-              $("task-backend").value === b &&
-              config.profiles[b]?.base_url === p.base_url
-            )
-              alert("task-alert", error.message, "error");
-          } finally {
-            taskModelRequests.delete(requestKey);
-            taskProfile();
-          }
-        }
-        function settingsForm() {
-          const p = config.profiles[backend] || {};
-          for (const b of document.querySelectorAll("[data-backend]"))
-            b.setAttribute(
-              "aria-pressed",
-              String(b.dataset.backend === backend),
-            );
-          $("base-url").value = p.base_url || "";
-          $("model").value = p.model || "";
-          $("auto-select-model").checked = p.auto_select_model === true;
-          $("api-key").value = "";
-          $("protocol").textContent = protocols[backend];
-          $("key-status").textContent =
-            p.key_source === "environment"
-              ? "· 来自环境变量"
-              : p.key_configured
-                ? "· 已加密保存"
-                : "· 尚未配置";
-          const strengths =
-            backend === "claude"
-              ? ["", "low", "medium", "high", "xhigh", "max"]
-              : backend === "deepseek"
-                ? ["", "high", "max"]
-                : [""];
-          $("effort-field").hidden = backend === "gemini";
-          $("effort").replaceChildren(
-            ...strengths.map((v) => {
-              const n = el("option", "", v || "默认");
-              n.value = v;
-              return n;
-            }),
-          );
-          $("effort").value = p.effort || "";
-          const rt = config.runtimes[backend] || {};
-          $("runtime").textContent =
-            `${p.runtime || names[backend]} · ${rt.installed ? "SDK " + rt.version + " 已安装" : "SDK 尚未安装，请运行 install.ps1"}`;
-          $("model-browser").hidden = !modelLists[backend];
-          $("model-search").value = "";
-          renderModels();
-          alert("settings-alert", "");
-        }
-        for (const b of document.querySelectorAll("[data-backend]"))
-          b.onclick = () => {
-            if (busy) return;
-            backend = b.dataset.backend;
-            settingsForm();
-          };
-        function settingsBusy(value) {
-          busy = value;
-          for (const n of document.querySelectorAll(
-            "#settings input,#settings select,#settings button",
-          ))
-            n.disabled = value;
-        }
-        function settingsPayload() {
-          return {
-            backend,
-            base_url: $("base-url").value.trim(),
-            key: $("api-key").value,
-            model: $("model").value.trim(),
-            effort: $("effort").value,
-            auto_select_model: $("auto-select-model").checked,
-          };
-        }
-        function renderModels() {
-          const list = modelLists[backend] || [],
-            q = $("model-search").value.toLowerCase();
-          $("models").replaceChildren();
-          let count = 0;
-          for (const m of list) {
-            if (q && !m.toLowerCase().includes(q)) continue;
-            count++;
-            const b = el("button", m === $("model").value ? "selected" : "", m);
-            b.type = "button";
-            b.onclick = () => {
-              $("model").value = m;
-              renderModels();
-            };
-            $("models").append(b);
-          }
-          $("model-count").textContent =
-            `显示 ${count} / ${list.length} 个模型；ID 按接口原样保留。`;
-        }
-        $("model-search").oninput = renderModels;
-        $("model").oninput = renderModels;
-        async function settingAction(action) {
-          if (busy) return;
-          const payload = settingsPayload();
-          settingsBusy(true);
-          alert(
-            "settings-alert",
-            action === "models"
-              ? "正在拉取模型…"
-              : action === "test"
-                ? "正在测试基础生成…"
-                : "正在保存配置…",
-          );
-          try {
-            const data = await request(action, payload);
-            if (action === "models") {
-              modelLists[backend] = Array.isArray(data.models)
-                ? data.models
-                : [];
-              taskModelLists[backend] = {
-                base_url: data.base_url,
-                models: modelLists[backend],
-              };
-              $("model-browser").hidden = false;
-              renderModels();
-              taskProfile();
-              alert(
-                "settings-alert",
-                `已获取 ${data.total_count} 个模型。选择后保存。`,
-                "success",
-              );
-            } else if (action === "test") {
-              alert(
-                "settings-alert",
-                `基础生成通过：${data.reply}\n${data.note}`,
-                "success",
-              );
-            } else {
-              config = data;
-              settingsForm();
-              updateSummary();
-              alert(
-                "settings-alert",
-                "配置已保存。新任务将使用此配置。",
-                "success",
-              );
-            }
-          } catch (e) {
-            alert("settings-alert", e.message, "error");
-          } finally {
-            settingsBusy(false);
-          }
-        }
-        $("fetch-models").onclick = () => settingAction("models");
-        $("test").onclick = () => settingAction("test");
-        $("save").onclick = () => settingAction("config");
-        $("task-model").onchange = taskProfile;
-        $("task-fetch-models").onclick = () => loadTaskModels(true);
-        $("task-backend").onchange = () => {
-          $("task-model").value = "";
-          taskProfile();
-          alert("task-alert", "");
-          loadTaskModels();
-        };
-        for (const radio of document.querySelectorAll("[name=mode]"))
-          radio.onchange = () => {
-            $("workspace-field").hidden =
-              document.querySelector("[name=mode]:checked").value !== "edit";
-          };
-        $("task-form").onsubmit = async (e) => {
-          e.preventDefault();
-          const b = $("task-backend").value;
-          if (!config.profiles[b]?.ready) {
-            alert(
-              "task-alert",
-              "请先在连接设置中保存此代理的地址、Key 和模型。",
-              "error",
-            );
-            return;
-          }
-          $("submit").disabled = true;
-          alert("task-alert", "正在提交任务…");
-          try {
-            const data = await request("tasks", {
-              backend: b,
-              project_dir: $("task-project").value.trim(),
-              task: $("task-prompt").value,
-              model: $("task-model").value.trim(),
-              mode: document.querySelector("[name=mode]:checked").value,
-              workspace_mode: $("task-workspace").value,
-              timeout_seconds: Number($("task-timeout").value),
-              task_complexity:
-                config.profiles[b]?.auto_select_model &&
-                !$("task-model").value.trim()
-                  ? $("task-complexity").value
-                  : null,
-            });
-            selected = data.job_id;
-            alert("task-alert", "");
-            tab("monitor");
-            await poll(true);
-          } catch (e) {
-            alert("task-alert", e.message, "error");
-          } finally {
-            $("submit").disabled = false;
-          }
-        };
-        function badge(status) {
-          return el("span", "badge " + status, statuses[status] || status);
-        }
-        function renderList() {
-          const q = $("search").value.toLowerCase(),
-            list = jobs.filter((j) =>
-              [j.title, j.job_id, j.model, j.backend].some((v) =>
-                String(v || "")
-                  .toLowerCase()
-                  .includes(q),
-              ),
-            );
-          $("jobs").replaceChildren();
-          if (!list.length) {
-            const n = el("div", "empty");
-            n.append(
-              el("strong", "", "还没有任务"),
-              el("span", "", "从「新建任务」开始一次委派。"),
-            );
-            $("jobs").append(n);
-            return;
-          }
-          for (const j of list) {
-            const b = el(
-              "button",
-              "job" + (j.job_id === selected ? " selected" : ""),
-            );
-            b.type = "button";
-            b.title = j.title || "未命名任务";
-            b.append(
-              el("div", "job-title", j.title || "未命名任务"),
-              el(
-                "div",
-                "job-meta",
-                `${names[j.backend] || j.backend} · ${j.model}`,
-              ),
-            );
-            const footer = el("div", "job-footer");
-            const t = el("span", "sub", duration(j));
-            t.dataset.duration = j.job_id;
-            footer.append(badge(j.status), t);
-            b.append(footer);
-            b.onclick = () => {
-              selected = j.job_id;
-              render();
-            };
-            $("jobs").append(b);
-          }
-        }
-        function metric(label, value) {
-          const n = el("div", "metric");
-          n.append(el("div", "label", label), el("div", "value", value));
-          return n;
-        }
-        function renderDetail() {
-          const j = jobs.find((j) => j.job_id === selected);
-          if (!j) return;
-          const previousEvents = $("detail").querySelector(".events"),
-            sameJob = previousEvents?.dataset.jobId === j.job_id,
-            scrollTop = sameJob ? previousEvents.scrollTop : 0,
-            anchor =
-              scrollTop > 0
-                ? [...previousEvents.children].find(
-                    (item) => item.offsetTop + item.offsetHeight > scrollTop,
-                  )
-                : null,
-            anchorKey = anchor?.dataset.eventKey,
-            anchorOffset = anchor ? anchor.offsetTop - scrollTop : 0,
-            restoreFocus = sameJob && document.activeElement === previousEvents;
-          $("detail").replaceChildren();
-          const p = j.progress || {},
-            top = el("div", "card"),
-            head = el("div", "detail-top");
-          head.append(el("h2", "", j.title || "任务详情"), badge(j.status));
-          top.append(
-            head,
-            el(
-              "div",
-              "detail-meta",
-              `${j.runtime || names[j.backend]} · ${j.model} · ${j.mode === "edit" ? "编辑执行" : "只读审查"}`,
-            ),
-            el("div", "detail-meta", j.job_id),
-          );
-          if (j.model_selection) {
-            const selection = j.model_selection,
-              labels = {
-                automatic: "自动选型",
-                fallback: "选型回退",
-                explicit: "本次指定",
-                default: "默认模型",
-              };
-            top.append(
-              el(
-                "div",
-                "selection-note",
-                `${labels[selection.mode] || "模型选择"} · ${selection.reason || ""}` +
-                  (selection.default_model &&
-                  selection.default_model !== j.model
-                    ? ` 默认模型仍为 ${selection.default_model}。`
-                    : ""),
-              ),
-            );
-          }
-          const metrics = el("div", "metrics"),
-            time = metric("运行时长", duration(j));
-          time.querySelector(".value").dataset.duration = j.job_id;
-          metrics.append(
-            time,
-            metric(
-              "模型调用",
-              `${p.model_calls || 0} / ${p.budget_model_calls || 40}`,
-            ),
-            metric("工具调用", p.tool_calls || 0),
-          );
-          top.append(
-            metrics,
-            el("div", "phase", p.phase || "正在启动运行环境"),
-          );
-          if (j.status === "running" && j.can_cancel) {
-            const cancel = el("button", "btn danger small", "终止任务");
-            cancel.style.marginTop = "14px";
-            cancel.type = "button";
-            cancel.onclick = async () => {
-              cancel.disabled = true;
-              try {
-                await request("cancel", { job_id: j.job_id });
-                await poll(true);
-              } catch (e) {
-                alert("monitor-alert", e.message, "error");
-                cancel.disabled = false;
-              }
-            };
-            top.append(cancel);
-          }
-          const msg = el("div", "alert error");
-          msg.id = "monitor-alert";
-          msg.hidden = true;
-          top.append(msg);
-          $("detail").append(top);
-          if (j.error) {
-            const error = el("div", "alert error", j.error);
-            $("detail").append(error);
-          }
-          if (j.workspace) {
-            const w = j.workspace,
-              card = el("div", "card"),
-              row = el("div", "section-row");
-            row.append(
-              el(
-                "h3",
-                "",
-                w.strategy === "worktree" ? "独立工作区" : "项目工作区",
-              ),
-            );
-            if (j.mode === "edit") {
-              const show = el(
-                "button",
-                "btn small",
-                changeCache.has(j.job_id) ? "刷新变更" : "查看变更",
-              );
-              show.type = "button";
-              show.onclick = async () => {
-                show.disabled = true;
-                try {
-                  changeCache.set(
-                    j.job_id,
-                    await request("changes", { job_id: j.job_id }),
-                  );
-                  renderDetail();
-                } catch (e) {
-                  changeCache.set(j.job_id, { error: e.message });
-                  renderDetail();
-                }
-              };
-              row.append(show);
-            }
-            card.append(row, el("div", "workspace", w.path));
-            if (w.branch) card.append(el("div", "hint", `分支 ${w.branch}`));
-            if (j.mode === "edit")
-              card.append(
-                el(
-                  "p",
-                  "hint",
-                  "修改保留在此目录。检查差异后，再将需要的更改合并到项目。",
-                ),
-              );
-            const changes = changeCache.get(j.job_id);
-            if (changes) {
-              if (changes.error)
-                card.append(el("div", "alert error", changes.error));
-              else {
-                card.append(
-                  el("pre", "", changes.diff || "没有已跟踪文件的差异。"),
-                );
-                if (changes.diff_truncated)
-                  card.append(
-                    el("p", "hint", "差异已截断，请在工作区查看完整内容。"),
-                  );
-                if (changes.untracked_files?.length)
-                  card.append(
-                    el(
-                      "p",
-                      "hint",
-                      "新增文件：\n" + changes.untracked_files.join("\n"),
-                    ),
-                  );
-              }
-            }
-            $("detail").append(card);
-          }
-          const activity = el("div", "card");
-          activity.append(el("h3", "", "最近活动"));
-          const list = el("ol", "events");
-          list.dataset.jobId = j.job_id;
-          list.tabIndex = 0;
-          list.setAttribute("aria-label", "最近活动，最新在前");
-          for (const event of [...(p.events || [])].reverse()) {
-            const li = el("li");
-            li.dataset.eventKey = JSON.stringify([
-              event.timestamp,
-              event.label,
-            ]);
-            li.append(
-              el("time", "", stamp(event.timestamp)),
-              el("span", "", event.label),
-            );
-            list.append(li);
-          }
-          activity.append(list);
-          if (!list.childNodes.length)
-            activity.append(
-              el("p", "hint", "运行环境启动后，这里会显示工具活动。"),
-            );
-          $("detail").append(activity);
-          if (scrollTop > 0) {
-            const currentAnchor = [...list.children].find(
-              (item) => item.dataset.eventKey === anchorKey,
-            );
-            list.scrollTop = currentAnchor
-              ? currentAnchor.offsetTop - anchorOffset
-              : scrollTop;
-          }
-          if (restoreFocus) list.focus({ preventScroll: true });
-          if (j.result) {
-            const card = el("div", "card"),
-              row = el("div", "section-row"),
-              copy = el("button", "btn small", "复制结果");
-            copy.type = "button";
-            copy.onclick = async () => {
-              try {
-                await navigator.clipboard.writeText(j.result);
-                copy.textContent = "已复制";
-              } catch {
-                copy.textContent = "请手动选择文本";
-              }
-            };
-            row.append(el("h3", "", "执行结果"), copy);
-            card.append(row, el("pre", "result", j.result));
-            if (j.result_truncated)
-              card.append(
-                el(
-                  "p",
-                  "hint",
-                  "结果已截断，可通过 MCP get_job 分页读取完整文本。",
-                ),
-              );
-            $("detail").append(card);
-          }
-        }
-        function render() {
-          renderList();
-          renderDetail();
-        }
-        $("search").oninput = renderList;
-        function sync(text, error = false) {
-          $("sync").replaceChildren(
-            el("span", "dot" + (error ? " error" : "")),
-            document.createTextNode(text),
-          );
-        }
-        async function poll(force = false) {
-          clearTimeout(timer);
-          if (fetching || (paused && !force)) return;
-          fetching = true;
-          try {
-            const data = await request("jobs");
-            const mark = JSON.stringify(data.jobs);
-            jobs = Array.isArray(data.jobs) ? data.jobs : [];
-            if (!selected && jobs.length) selected = jobs[0].job_id;
-            if (mark !== fingerprint) {
-              fingerprint = mark;
-              const scroll =
-                $("detail").querySelector(".result")?.scrollTop || 0;
-              render();
-              const pre = $("detail").querySelector(".result");
-              if (pre) pre.scrollTop = scroll;
-            }
-            $("running-count").textContent = jobs.filter(
-              (j) => j.status === "running",
-            ).length;
-            sync(
-              paused ? "自动刷新已暂停" : `更新于 ${stamp(data.updated_at)}`,
-            );
-          } catch (e) {
-            sync("连接中断，正在重试", true);
-          } finally {
-            fetching = false;
-            if (!paused) timer = setTimeout(poll, 1500);
-          }
-        }
-        $("refresh").onclick = () => poll(true);
-        $("pause").onclick = () => {
-          paused = !paused;
-          $("pause").textContent = paused ? "继续" : "暂停";
-          if (paused) {
-            clearTimeout(timer);
-            sync("自动刷新已暂停");
-          } else poll();
-        };
-        setInterval(() => {
-          for (const n of document.querySelectorAll("[data-duration]")) {
-            const j = jobs.find((j) => j.job_id === n.dataset.duration);
-            if (j) n.textContent = duration(j);
-          }
-        }, 1000);
-        async function init() {
-          try {
-            config = await request("config");
-            settingsForm();
-            updateSummary();
-            if (config.default_project_dir)
-              $("task-project").value = config.default_project_dir;
-            if (!Object.values(config.profiles).some((p) => p.ready)) {
-              tab("settings");
-              alert("settings-alert", "选择一个代理，填写连接配置后开始使用。");
-            }
-          } catch (e) {
-            alert("settings-alert", e.message, "error");
-            tab("settings");
-          }
-          poll();
-        }
-        init();
-      })();
-    </script>
+    <script src="dashboard.js" defer></script>
   </body>
 </html>

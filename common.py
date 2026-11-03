@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import ctypes
+from contextlib import contextmanager
 from ctypes import wintypes
+import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
+import uuid
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
@@ -30,10 +33,69 @@ PROVIDERS = {
     "deepseek": {"label": "DeepSeek", "runtime": "DeepSeek Harness · dsh", "protocol": "DeepSeek Messages"},
 }
 _settings_lock = threading.RLock()
+_settings_local = threading.local()
 
 
 class RelayError(RuntimeError):
     pass
+
+
+class ConfigurationConflict(RelayError):
+    pass
+
+
+@contextmanager
+def configuration_lock():
+    """Serialize short profile transactions across threads AND service processes."""
+    with _settings_lock:
+        if getattr(_settings_local, "depth", 0):
+            yield
+            return
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        with (STATE_DIR / ".config.lock").open("a+b") as stream:
+            stream.seek(0, os.SEEK_END)
+            if not stream.tell():
+                stream.write(b"\0")
+                stream.flush()
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream, fcntl.LOCK_EX)
+            _settings_local.depth = 1
+            try:
+                yield
+            finally:
+                _settings_local.depth = 0
+                stream.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def profile_revision(backend: str) -> str:
+    """Opaque version from profile data and credential-file metadata, never key material."""
+    check_backend(backend)
+    with configuration_lock():
+        path = STATE_DIR / "settings.json"
+        profile = json.loads(path.read_text(encoding="utf-8")).get("profiles", {}).get(backend, {}) if path.exists() else {}
+        try:
+            info = (STATE_DIR / (backend + ".dpapi")).stat()
+            credential_version = (info.st_ino, info.st_mtime_ns, info.st_size)
+        except FileNotFoundError:
+            credential_version = None
+        version = [profile, credential_version,
+                   bool(os.environ.get("AGENT_HUB_" + backend.upper() + "_API_KEY", "").strip())]
+        return hashlib.sha256(json.dumps(version, sort_keys=True).encode()).hexdigest()
+
+
+def require_revision(backend: str, revision: str | None) -> None:
+    # Call inside configuration_lock when followed by a write or credential snapshot.
+    if not revision or revision != profile_revision(backend):
+        raise ConfigurationConflict("配置已更新或缺少版本信息。请重新加载已保存配置，合并本地修改后再保存。")
 
 
 def check_backend(backend: str) -> str:
@@ -98,12 +160,13 @@ def save_settings(base_url: str, model: str, backend: str = "gemini", effort: st
     payload = validate_profile(base_url, model, backend, effort)
     if auto_select_model is not None and not isinstance(auto_select_model, bool):
         raise RelayError("自动选择适配模型必须为布尔值。")
-    with _settings_lock:
+    with configuration_lock():
         path = STATE_DIR / "settings.json"
         data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"profiles": {}}
         previous = data.get("profiles", {}).get(backend, {})
         payload["auto_select_model"] = (previous.get("auto_select_model") is True
                                         if auto_select_model is None else auto_select_model)
+        payload["revision"] = uuid.uuid4().hex
         data.setdefault("profiles", {})[backend] = payload
         _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"))
 
@@ -139,7 +202,8 @@ def save_key(key: str, backend: str = "gemini") -> None:
     key = key.strip()
     if not key:
         raise RelayError("API Key 不能为空。")
-    _atomic_write(STATE_DIR / (backend + ".dpapi"), _dpapi(key.encode("utf-8")))
+    with configuration_lock():
+        _atomic_write(STATE_DIR / (backend + ".dpapi"), _dpapi(key.encode("utf-8")))
 
 
 def load_key(backend: str = "gemini") -> str:

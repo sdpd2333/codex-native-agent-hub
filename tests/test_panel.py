@@ -113,6 +113,11 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
+        self.assertIn("script-src 'self'", headers["Content-Security-Policy"])
+        status, script, headers = await self.request("dashboard.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", headers["Content-Type"])
+        self.assertIn(b"use strict", script)
         status, body, _ = await self.request("api/config")
         config = json.loads(body)
         self.assertFalse(config["ready"])
@@ -125,13 +130,15 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         for extra, expected in (({"X-Agent-Hub": ""}, 403),
                                 ({"Origin": "https://untrusted.invalid"}, 403),
                                 ({"Content-Type": "text/plain"}, 415)):
-            self.assertEqual((await self.request("api/config", "POST", {}, extra))[0], expected)
+            with self.subTest(headers=extra):
+                self.assertEqual((await self.request("api/config", "POST", {}, extra))[0], expected)
         self.assertEqual((await self.request("api/tasks"))[0], 404)
         self.assertEqual((await self.request("api/config", "POST", []))[0], 400)
 
     async def test_configuration_round_trip_and_saved_key_is_not_returned(self):
         key = "panel-fixture-credential"
-        payload = {"base_url": "https://relay.example.com/v1", "key": key, "model": "gemini-alias", "auto_select_model": True}
+        payload = {"base_url": "https://relay.example.com/v1", "key": key, "model": "gemini-alias", "auto_select_model": True,
+                   "revision": common.profile_revision("gemini")}
         status, body, _ = await self.request("api/config", "POST", payload)
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["ready"])
@@ -144,6 +151,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(key.encode(), body)
         self.assertTrue(json.loads(body)["profiles"]["gemini"]["auto_select_model"])
         self.assertNotIn(key.encode(), (common.STATE_DIR / "gemini.dpapi").read_bytes())
+        payload["revision"] = json.loads(body)["revision"]
         with patch.object(common, "fetch_models", return_value=["gemini-alias", "vendor-exact-ID"]) as fetch:
             status, body, _ = await self.request("api/models", "POST", {**payload, "key": ""})
             self.assertEqual(json.loads(body)["models"], ["gemini-alias", "vendor-exact-ID"])
@@ -190,6 +198,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["project_dir"], str(APP))
         self.assertNotIn("_control_url", snapshot)
         self.assertNotIn("_pid", snapshot)
+        self.assertNotIn("result", snapshot)
+        self.assertEqual(snapshot["result_chars"], len("review finished"))
         class EmptyProcess(Process):
             async def communicate(self, _payload):
                 return b'{"ok":true,"text":""}', b""
@@ -232,6 +242,57 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         _, body, _ = await self.request("api/jobs")
         self.assertEqual(json.loads(body)["jobs"][0]["status"], "interrupted")
         self.assertEqual((await server.cancel_job(job["job_id"]))["status"], "interrupted")
+
+    async def test_stale_configuration_cannot_replace_profile_or_key(self):
+        common.save_settings("https://relay.example.com", "first", "claude")
+        common.save_key("original-fixture", "claude")
+        revision = common.profile_revision("claude")
+        common.save_settings("https://relay.example.com", "external-model", "claude")
+        payload = {"backend": "claude", "base_url": "https://relay.example.com", "model": "first",
+                   "effort": "high", "key": "replacement-fixture", "revision": revision}
+        status, body, _ = await self.request("api/config", "POST", payload)
+        self.assertEqual(status, 409)
+        self.assertIn("配置已更新", json.loads(body)["error"])
+        self.assertEqual(common.load_settings("claude")["model"], "external-model")
+        self.assertEqual(common.load_key("claude"), "original-fixture")
+        self.assertNotIn(b"replacement-fixture", body)
+        payload.pop("revision")
+        self.assertEqual((await self.request("api/config", "POST", payload))[0], 409)
+
+    async def test_credential_rotation_changes_revision_and_rejects_old_catalog(self):
+        common.save_settings("https://relay.example.com", "model")
+        common.save_key("first-fixture")
+        revision = common.profile_revision("gemini")
+        self.assertEqual(common.profile_revision("gemini"), revision)
+        common.save_key("second-fixture")
+        self.assertNotEqual(common.profile_revision("gemini"), revision)
+        with patch.object(common, "fetch_models") as fetch:
+            status, _, _ = await self.request("api/models", "POST", {
+                "base_url": "https://relay.example.com", "revision": revision})
+            self.assertEqual(status, 409)
+            fetch.assert_not_called()
+
+    async def test_full_result_pagination_and_invalid_panel_parameters(self):
+        full = "汉字🙂abc\n" * 15000
+        job = {"job_id": "a" * 16, "status": "completed", "result": full, "project_dir": str(APP)}
+        progress.save_job(job)
+        _, body, _ = await self.request("api/jobs")
+        summary = json.loads(body)["jobs"][0]
+        self.assertEqual(summary["result_chars"], len(full))
+        self.assertNotIn("result", summary)
+        self.assertLess(len(body), 3000)
+        offset, pieces = 0, []
+        while offset is not None:
+            status, body, _ = await self.request("api/job", "POST", {"job_id": job["job_id"], "offset": offset})
+            self.assertEqual(status, 200)
+            page = json.loads(body)
+            self.assertEqual(page["offset"], offset)
+            self.assertEqual(page["total_chars"], len(full))
+            pieces.append(page["result"])
+            offset = page["next_offset"]
+        self.assertEqual("".join(pieces), full)
+        for invalid in ({"offset": True}, {"offset": -1}, {"offset": "0"}, {"max_chars": None}, {"max_chars": 50001}):
+            self.assertEqual((await self.request("api/job", "POST", {"job_id": job["job_id"], **invalid}))[0], 400)
 
 
 if __name__ == "__main__":

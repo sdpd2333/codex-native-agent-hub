@@ -19,6 +19,7 @@ class PanelServer:
         self.dispatch = dispatch
         self.loop = loop
         self.html = (html_path or common.APP_DIR / "dashboard.html").read_bytes()
+        self.script = (common.APP_DIR / "dashboard.js").read_bytes()
         self.token = secrets.token_urlsafe(32)
         panel = self
 
@@ -35,7 +36,7 @@ class PanelServer:
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
+                self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
                 self.end_headers()
                 try:
                     self.wfile.write(body)
@@ -55,11 +56,14 @@ class PanelServer:
                 if method == "GET" and action == "":
                     self.reply(200, panel.html, "text/html; charset=utf-8")
                     return
+                if method == "GET" and action == "dashboard.js":
+                    self.reply(200, panel.script, "text/javascript; charset=utf-8")
+                    return
                 if method == "GET" and action == "api/health":
                     self.reply(200, {"ok": True, "application": "native-agent-hub"})
                     return
                 allowed = {"GET": {"api/jobs", "api/config"},
-                           "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes"}}
+                           "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes", "api/job"}}
                 if action not in allowed.get(method, set()):
                     self.reply(404, {"error": "接口不存在。"})
                     return
@@ -94,7 +98,7 @@ class PanelServer:
                 except Exception as exc:
                     # Known errors are already sanitized at the operation boundary.
                     detail = str(exc) if isinstance(exc, common.RelayError) else "本地服务操作失败，请重试。"
-                    self.reply(400, {"error": detail})
+                    self.reply(409 if isinstance(exc, common.ConfigurationConflict) else 400, {"error": detail})
 
             def do_GET(self):
                 self.route("GET")

@@ -92,9 +92,11 @@ mcp = FastMCP("native-agent-hub", lifespan=lifespan, instructions=
 
 
 def profile_status(backend: str) -> dict:
-    settings = common.load_settings(backend)
-    configured = common.has_key(backend)
-    return {**settings, **common.PROVIDERS[backend], "backend": backend, "key_configured": configured,
+    with common.configuration_lock():
+        settings = common.load_settings(backend)
+        configured = common.has_key(backend)
+        revision = common.profile_revision(backend)
+    return {**settings, **common.PROVIDERS[backend], "backend": backend, "key_configured": configured, "revision": revision,
             "model_selection_policy": model_selection.policy(settings["auto_select_model"], backend),
             "ready": configured and bool(settings["model"]) and bool(settings["base_url"]),
             "key_source": "environment" if os.environ.get("AGENT_HUB_" + backend.upper() + "_API_KEY", "").strip()
@@ -144,33 +146,40 @@ def panel_credentials(payload: dict, backend: str) -> tuple[str, str, str]:
 async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
     if method == "GET":
         if action == "jobs":
-            return {"jobs": await asyncio.to_thread(progress.list_jobs), "updated_at": now()}
+            return {"jobs": await asyncio.to_thread(progress.list_jobs, include_result=False), "updated_at": now()}
         if action == "config":
             return get_configuration()
     backend = common.check_backend(str(payload.get("backend", "gemini")))
     if action in ("config", "models", "test"):
         key = ""
         try:
-            base, key, entered = panel_credentials(payload, backend)
+            with common.configuration_lock():
+                if "revision" in payload:
+                    common.require_revision(backend, payload["revision"])
+                base, key, entered = panel_credentials(payload, backend)
+                revision = common.profile_revision(backend)
             if action == "models":
                 models = await asyncio.to_thread(common.fetch_models, base, key, backend)
-                return {"backend": backend, "base_url": base, "models": models, "total_count": len(models),
+                return {"backend": backend, "base_url": base, "revision": revision, "models": models, "total_count": len(models),
                         "selected": common.load_settings(backend)["model"]}
             profile = common.validate_profile(base, str(payload.get("model", "")).strip(), backend,
                                                str(payload.get("effort", "")))
             if action == "test":
                 reply = await asyncio.to_thread(common.test_native_model, base, key, profile["model"], backend)
                 return {"ok": True, "backend": backend, "reply": common.redact(reply, key),
-                        "note": "基础生成通过；请再提交只读任务验证原生工具调用。"}
+                        "note": "测试不会保存配置。请先保存，再提交只读任务验证原生工具调用。"}
             # Validate the full profile before changing credentials for this backend.
             automatic = payload.get("auto_select_model", common.load_settings(backend)["auto_select_model"])
             if not isinstance(automatic, bool):
                 raise common.RelayError("自动选择适配模型必须为布尔值。")
-            with common._settings_lock:
+            with common.configuration_lock():
+                common.require_revision(backend, payload.get("revision"))
                 if entered:
                     common.save_key(entered, backend)
                 common.save_settings(base, profile["model"], backend, profile["effort"], automatic)
             return {"ok": True, **get_configuration(backend)}
+        except common.ConfigurationConflict:
+            raise
         except Exception as exc:
             raise common.RelayError(common.redact(str(exc), key, str(payload.get("key", "")))) from None
     if action == "tasks":
@@ -182,6 +191,9 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
         return await cancel_job(str(payload.get("job_id", "")))
     if action == "changes":
         return await get_changes(str(payload.get("job_id", "")))
+    if action == "job":
+        return await get_job(str(payload.get("job_id", "")), offset=payload.get("offset", 0),
+                             max_chars=payload.get("max_chars", 20000))
     raise common.RelayError("接口不存在。")
 
 
@@ -199,11 +211,16 @@ async def list_models(backend: Literal["gemini", "claude", "deepseek"] = "gemini
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True))
 async def select_model(model: str, backend: Literal["gemini", "claude", "deepseek"] = "gemini") -> dict:
     """Save an exact model ID only when the user asks to change their selected model."""
-    settings = common.load_settings(backend)
-    models = await asyncio.to_thread(common.fetch_models, settings["base_url"], common.load_key(backend), backend)
+    with common.configuration_lock():
+        settings = common.load_settings(backend)
+        revision = common.profile_revision(backend)
+        key = common.load_key(backend)
+    models = await asyncio.to_thread(common.fetch_models, settings["base_url"], key, backend)
     if model not in models:
         raise common.RelayError("模型不在当前 Key 可访问的列表中，请先调用 list_models。")
-    common.save_settings(settings["base_url"], model, backend, settings["effort"])
+    with common.configuration_lock():
+        common.require_revision(backend, revision)
+        common.save_settings(settings["base_url"], model, backend, settings["effort"])
     return {"backend": backend, "selected": model}
 
 
@@ -305,12 +322,13 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
         raise common.RelayError("timeout_seconds 必须为 10 到 1800 之间的整数。")
     if task_complexity is not None and (not isinstance(task_complexity, str) or task_complexity not in model_selection.COMPLEXITIES):
         raise common.RelayError("task_complexity 必须为 simple、standard 或 complex。")
-    settings = common.load_settings(backend)
-    selected = settings["model"] if model is None else model
-    if not isinstance(selected, str):
-        raise common.RelayError("模型 ID 无效。")
-    profile = common.validate_profile(settings["base_url"], selected, backend, settings["effort"])
-    key = common.load_key(backend)
+    with common.configuration_lock():
+        settings = common.load_settings(backend)
+        selected = settings["model"] if model is None else model
+        if not isinstance(selected, str):
+            raise common.RelayError("模型 ID 无效。")
+        profile = common.validate_profile(settings["base_url"], selected, backend, settings["effort"])
+        key = common.load_key(backend)
     if sum(job["status"] == "running" for job in JOBS.values()) >= 2:
         raise common.RelayError("已有两个任务运行中，请等待完成或取消其中一个。")
     selection = {"model": profile["model"], "mode": "explicit" if model is not None else "default",
@@ -359,13 +377,14 @@ async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars
     job = JOBS.get(job_id) or progress.load_job(job_id)
     if job is None:
         raise common.RelayError("任务不存在。")
-    if not 0 <= wait_seconds <= 20 or offset < 0 or not 100 <= max_chars <= 50000:
+    if (any(isinstance(value, bool) or not isinstance(value, int) for value in (wait_seconds, offset, max_chars))
+            or not 0 <= wait_seconds <= 20 or offset < 0 or not 100 <= max_chars <= 50000):
         raise common.RelayError("查询参数超出范围。")
     if wait_seconds and job["status"] == "running" and "future" in job:
         await asyncio.wait({job["future"]}, timeout=wait_seconds)
     result = {name: value for name, value in job.items() if name not in ("future", "process", "result") and not name.startswith("_")}
     activity = progress.snapshot(job, include_result=False)
-    result.update(status=activity["status"], progress=activity["progress"])
+    result.update(activity)
     if "result" in job:
         full = job["result"]
         result.update(result=full[offset:offset + max_chars], offset=offset, total_chars=len(full),

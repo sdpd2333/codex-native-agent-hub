@@ -3,11 +3,13 @@
 Prints file names and line numbers, never matched credential values.
 """
 from pathlib import Path
+import os
 import re
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+             "node_modules", "outputs", "test-results"}
 PRIVATE_NAMES = {"key.dpapi", "settings.json", "runtime.json", "panel.json", "job.json", ".env", "id_rsa", "id_ed25519"}
 PRIVATE_SUFFIXES = {".log", ".pem", ".key", ".p12", ".pfx", ".sqlite", ".sqlite3", ".bak", ".dpapi", ".jsonl"}
 PATTERNS = {
@@ -18,10 +20,18 @@ PATTERNS = {
 }
 
 
+def source_paths(root: Path):
+    # Prune local artifacts before descending into installed SDKs and browser test output.
+    for directory, subdirs, files in os.walk(root):
+        subdirs[:] = sorted(name for name in subdirs if name not in SKIP_DIRS)
+        for name in subdirs + sorted(files):
+            yield Path(directory) / name
+
+
 def audit(root: Path = ROOT) -> tuple[int, list[str]]:
     issues = []
     scanned = 0
-    for path in sorted(root.rglob("*")):
+    for path in source_paths(root):
         relative = path.relative_to(root)
         if any(part in SKIP_DIRS for part in relative.parts):
             continue

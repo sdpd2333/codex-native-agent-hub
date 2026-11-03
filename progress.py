@@ -199,13 +199,14 @@ def _snapshot(job: dict, *, include_result: bool = True) -> dict:
             if key in job}
     data.update(status=status, project_name=Path(job.get("project_dir", "")).name,
                 progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")))
+    text = str(job.get("result", ""))
+    data["result_chars"] = len(text)
     if include_result and "result" in job:
-        text = str(job["result"])
         data.update(result=text[:50000], result_truncated=len(text) > 50000)
     return data
 
 
-def list_jobs() -> list[dict]:
+def list_jobs(*, include_result: bool = True) -> list[dict]:
     directory = common.STATE_DIR / "jobs"
     try:
         paths = sorted(directory.glob("*/job.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True)
@@ -217,7 +218,7 @@ def list_jobs() -> list[dict]:
             continue
         data = load_job(path.parent.name)
         if data:
-            jobs.append(snapshot(data))
+            jobs.append(snapshot(data, include_result=include_result))
         if len(jobs) >= 50:
             break
     return sorted(jobs, key=lambda job: str(job.get("started_at", "")), reverse=True)
