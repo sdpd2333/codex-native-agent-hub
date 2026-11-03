@@ -362,7 +362,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             status, body, _ = await self.request(url=info["url"] + "api/config")
             self.assertEqual(status, 200)
             data = json.loads(body)
-            self.assertEqual(data["default_project_dir"], project)
+            self.assertEqual(data["default_project_dir"], str(Path(project).resolve()))
             self.assertEqual(data["panel_context"]["conversation_id"], conversation)
         common.save_key("panel-fixture-credential")
         common.save_settings("https://relay.example.com", "gemini-alias")

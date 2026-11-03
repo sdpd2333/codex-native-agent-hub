@@ -80,6 +80,12 @@ async function main() {
       await page.setViewportSize({ width, height: 900 });
       for (const tab of ["monitor", "task", "storage", "settings"]) {
         await page.locator(`#tab-${tab}`).click();
+        if (tab === "storage")
+          await page.waitForFunction(() =>
+            document
+              .querySelector("#storage-note")
+              .textContent.includes("共 2 个任务"),
+          );
         await page.waitForTimeout(80);
         const dimensions = await page.evaluate(() => ({
           client: document.documentElement.clientWidth,
@@ -214,15 +220,23 @@ async function main() {
     );
     await page.locator("#tab-monitor").click();
     await page.locator("#search").fill("does-not-exist");
+    await page
+      .locator("#jobs")
+      .getByText("没有匹配的任务", { exact: true })
+      .waitFor();
     assert.equal(
       await page.getByText("没有匹配的任务", { exact: true }).count(),
       1,
     );
     await page.getByRole("button", { name: "清除筛选", exact: true }).click();
+    await page.waitForSelector("#jobs .job");
     await page.setViewportSize({ width: 375, height: 900 });
     state.jobs = [];
     await page.locator("#refresh").click();
-    await page.waitForSelector("#jobs .empty");
+    await page
+      .locator("#jobs")
+      .getByText("此视图暂无任务", { exact: true })
+      .waitFor();
     const emptyWidth = await page
       .locator("#jobs .empty")
       .evaluate((node) => node.getBoundingClientRect().width);
