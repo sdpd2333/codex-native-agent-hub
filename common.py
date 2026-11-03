@@ -5,6 +5,7 @@ import ctypes
 from contextlib import contextmanager
 from ctypes import wintypes
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -108,8 +109,13 @@ def check_backend(backend: str) -> str:
 def normalize_base(value: str) -> str:
     value = value.strip().rstrip("/")
     parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise RelayError("Base URL 必须是有效的 HTTPS 地址。")
+    try:
+        loopback = parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname or "").is_loopback
+    except ValueError:
+        loopback = False
+    if (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback)
+            or not parsed.hostname or parsed.username or parsed.password):
+        raise RelayError("Base URL 必须使用 HTTPS；本机回环代理可使用 HTTP。")
     if parsed.query or parsed.fragment:
         raise RelayError("Base URL 不应包含查询参数或片段。")
     for suffix in ("/v1beta", "/v1"):

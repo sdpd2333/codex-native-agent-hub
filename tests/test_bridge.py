@@ -161,7 +161,7 @@ async def mcp_smoke():
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
-                assert {tool.name for tool in tools.tools} == {"get_configuration", "get_panel", "list_models", "select_model", "test_connection", "submit_task", "get_job", "cancel_job", "get_changes"}
+                assert {tool.name for tool in tools.tools} == {"get_configuration", "get_panel", "list_models", "select_model", "test_connection", "submit_task", "get_job", "cancel_job", "get_changes", "get_routing_context", "preview_routing"}
                 submit = next(tool for tool in tools.tools if tool.name == "submit_task")
                 assert {"task_complexity", "title", "task_kind", "model_override_reason", "conversation_id"} <= submit.inputSchema["properties"].keys()
                 panel_tool = next(tool for tool in tools.tools if tool.name == "get_panel")

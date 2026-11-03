@@ -1,0 +1,6 @@
+interface:
+  display_name: "NAH 规则委派"
+  short_description: "按实时规则跨代理选择模型，通过原生运行环境执行并检查任务结果"
+  default_prompt: "使用 $nah-delegate 按我的选型规则委派当前任务，并检查结果。"
+policy:
+  allow_implicit_invocation: true

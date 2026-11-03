@@ -78,8 +78,17 @@ async function main() {
     );
     for (const width of [320, 375, 480, 760, 1024]) {
       await page.setViewportSize({ width, height: 900 });
-      for (const tab of ["monitor", "task", "storage", "settings"]) {
+      for (const tab of ["monitor", "task", "storage", "rules", "settings"]) {
         await page.locator(`#tab-${tab}`).click();
+        if (tab === "rules" && width === 320) {
+          await page.locator("#rules-catalog").click();
+          await page.waitForFunction(() =>
+            document
+              .querySelector("#rules-catalog-status")
+              .textContent.includes("2"),
+          );
+          await page.locator("#rules-add").click();
+        }
         if (tab === "storage")
           await page.waitForFunction(() =>
             document

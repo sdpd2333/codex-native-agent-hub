@@ -71,10 +71,12 @@ class PanelServer:
                 if method == "GET" and action == "api/health":
                     self.reply(200, {"ok": True, "application": "native-agent-hub"})
                     return
-                allowed = {"GET": {"api/jobs", "api/config", "api/storage", "api/archive-policy"},
+                allowed = {"GET": {"api/jobs", "api/config", "api/storage", "api/archive-policy", "api/routing"},
                            "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes", "api/job",
                                     "api/jobs", "api/archive", "api/archive-policy", "api/archive-preview", "api/archive-bulk",
-                                    "api/storage-policy", "api/storage-preview", "api/storage-cleanup"}}
+                                    "api/storage-policy", "api/storage-preview", "api/storage-cleanup",
+                                    "api/local-detect", "api/local-sync", "api/routing", "api/routing-catalog",
+                                    "api/routing-context", "api/routing-preview"}}
                 if action not in allowed.get(method, set()):
                     self.reply(404, {"error": "接口不存在。"})
                     return
@@ -91,7 +93,7 @@ class PanelServer:
                     try:
                         length = int(self.headers.get("Content-Length", "0"))
                         # A 100,000-character task can exceed 256 KiB in UTF-8 or escaped JSON.
-                        limit = 2 * 1024 * 1024 if action == "api/tasks" else 256 * 1024
+                        limit = 2 * 1024 * 1024 if action in ("api/tasks", "api/routing-context") else 256 * 1024
                         if not 0 < length <= limit:
                             self.reply(413, {"error": "请求大小超出范围。"})
                             return

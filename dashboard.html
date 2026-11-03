@@ -838,6 +838,31 @@
           flex-basis: 150px;
         }
       }
+      .rule-card {
+        margin-top: 16px;
+      }
+      .rule-card .row {
+        flex-wrap: wrap;
+      }
+      .rule-pool {
+        min-height: 130px;
+      }
+      .rule-trace {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      #local-source-info {
+        overflow-wrap: anywhere;
+      }
+      #local-source-info {
+        white-space: pre-wrap;
+      }
+      input[type="checkbox"] {
+        width: auto;
+      }
+      nav {
+        flex-wrap: wrap;
+      }
     </style>
   </head>
   <body>
@@ -878,6 +903,15 @@
           aria-controls="storage"
         >
           存储管理</button
+        ><button
+          type="button"
+          id="tab-rules"
+          tabindex="-1"
+          role="tab"
+          aria-selected="false"
+          aria-controls="rules"
+        >
+          选型规则</button
         ><button
           type="button"
           id="tab-settings"
@@ -1137,6 +1171,17 @@
           </p>
           <div class="card">
             <div class="field">
+              <label for="task-selection-mode">选型方式</label>
+              <select id="task-selection-mode">
+                <option value="legacy">指定代理 · 默认或手选型号</option>
+                <option value="rules">跨代理规则 · 本次任务选择</option>
+              </select>
+              <p class="hint">
+                对话中由 Codex
+                判断意图；在面板中由你标记意图并试选。规则开启时，手动方式需要明确选择本次型号。
+              </p>
+            </div>
+            <div class="field">
               <label for="task-backend">执行代理</label
               ><select id="task-backend">
                 <option value="gemini">Gemini · Antigravity</option>
@@ -1253,12 +1298,89 @@
                 required
               />
             </div>
+            <div id="task-routing" hidden>
+              <p class="hint">
+                试选不会启动任务。先填写项目和任务，读取规则后标记匹配的意图，再预览候选池。
+              </p>
+              <button class="btn" id="route-context" type="button">
+                读取规则与实时候选
+              </button>
+              <fieldset class="field" id="route-intents">
+                <legend>手动判断任务意图</legend>
+              </fieldset>
+              <button class="btn" id="route-preview" type="button" disabled>
+                试选并解释
+              </button>
+              <div class="field">
+                <label for="route-candidate">本次规则候选</label
+                ><select id="route-candidate" disabled></select>
+              </div>
+              <div class="field">
+                <label for="route-reason">选择理由</label
+                ><input
+                  id="route-reason"
+                  maxlength="1000"
+                  placeholder="说明该组合为何适合本次任务"
+                />
+              </div>
+              <p class="hint rule-trace" id="route-result" role="status"></p>
+            </div>
             <div class="alert" id="task-alert" role="status" hidden></div>
             <button class="btn primary" type="submit" id="submit">
               启动任务
             </button>
           </div>
         </form>
+      </section>
+      <section id="rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+        <div class="form">
+          <h1>跨代理选型规则</h1>
+          <p class="intro">
+            按顺序匹配规则，各项条件同时满足时生效。Codex
+            理解任务意图，在允许的候选池内选择；执行仍使用对应的原生运行环境。
+          </p>
+          <div class="card">
+            <label class="choice" for="rules-enabled"
+              ><input id="rules-enabled" type="checkbox" />启用跨代理规则</label
+            >
+            <p class="hint">
+              关闭时沿用各代理的固定型号或自动选型。规则只影响新任务。每个代理使用连接设置中保存的独立连接。
+            </p>
+            <div class="row">
+              <button class="btn" type="button" id="rules-catalog">
+                刷新实时候选
+              </button>
+              <button class="btn" type="button" id="rules-add">添加规则</button>
+            </div>
+            <p class="hint" id="rules-catalog-status"></p>
+            <div id="rules-list"></div>
+            <div class="field">
+              <label for="rules-fallback">默认候选池</label
+              ><select
+                id="rules-fallback"
+                multiple
+                size="5"
+                class="rule-pool"
+              ></select>
+              <p class="hint">
+                无规则命中或允许回退的规则均不可用时使用。可按住 Ctrl
+                多选；顺序决定无人指定候选时的优先级。
+              </p>
+            </div>
+            <div class="row">
+              <button class="btn primary" type="button" id="rules-save">
+                保存规则
+              </button>
+              <button class="btn" type="button" id="rules-reload">
+                重新加载（清除规则草稿）
+              </button>
+              <button class="btn" type="button" id="rules-try">
+                到新建任务试选
+              </button>
+            </div>
+            <div class="alert" id="rules-alert" role="status" hidden></div>
+          </div>
+        </div>
       </section>
       <section
         id="settings"
@@ -1294,6 +1416,72 @@
             >
               DeepSeek<small>Harness / dsh</small>
             </button>
+          </div>
+          <div class="card">
+            <h2>本地客户端配置</h2>
+            <p class="hint">
+              默认关闭。点击检测后只读取此代理的用户级连接配置；不会写回客户端，也不会导入工具、权限或提示词。
+            </p>
+            <p class="hint" id="local-sync-status" role="status"></p>
+            <div class="field">
+              <label for="local-mode">同步方式</label
+              ><select id="local-mode">
+                <option value="off">关闭 · 插件独立管理</option>
+                <option value="import">检测并导入一次</option>
+                <option value="follow">跟随选定的本地配置</option>
+              </select>
+            </div>
+            <button class="btn" type="button" id="local-detect">
+              检测本地配置
+            </button>
+            <div class="field">
+              <label for="local-source">配置来源</label
+              ><select id="local-source">
+                <option value="">请先检测</option>
+              </select>
+            </div>
+            <p class="hint" id="local-source-info"></p>
+            <fieldset class="field">
+              <legend>导入字段</legend>
+              <div class="row">
+                <label
+                  ><input
+                    type="checkbox"
+                    name="local-field"
+                    value="base_url"
+                    checked
+                  />地址</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    name="local-field"
+                    value="api_key"
+                    checked
+                  />API Key</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    name="local-field"
+                    value="model"
+                    checked
+                  />模型</label
+                >
+                <label
+                  ><input
+                    type="checkbox"
+                    name="local-field"
+                    value="effort"
+                    checked
+                  />推理强度</label
+                >
+              </div>
+            </fieldset>
+            <button class="btn" type="button" id="local-apply">
+              应用同步设置
+            </button>
+            <div class="alert" id="local-alert" role="status" hidden></div>
           </div>
           <div class="card">
             <div class="field">

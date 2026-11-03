@@ -107,6 +107,8 @@
         "storage-cleanup",
         "archive-preview",
         "archive-bulk",
+        "routing-context",
+        "routing-catalog",
       ].includes(action)
         ? 155000
         : 30000,
@@ -218,9 +220,15 @@
   function acceptConfig(data) {
     const previous = config;
     config = data;
+    acceptRules(config.routing_policy);
+    if (!selectionModeTouched)
+      $("task-selection-mode").value = config.routing_policy?.enabled
+        ? "rules"
+        : "legacy";
     for (const b of Object.keys(names)) {
       const profile = config.profiles[b] || {};
       if (previous.profiles[b]?.revision !== profile.revision) {
+        invalidateRoute();
         taskModelLists.delete(b);
         modelLists.delete(b);
       }
@@ -257,6 +265,7 @@
   }
   function settingsForm() {
     const profile = config.profiles[backend] || {};
+    renderLocalSync();
     const draft = drafts.get(backend) || newDraft(profile);
     drafts.set(backend, draft);
     for (const node of document.querySelectorAll(
@@ -466,6 +475,10 @@
   };
 
   function taskProfile() {
+    const ruleMode = $("task-selection-mode").value === "rules";
+    $("task-routing").hidden = !ruleMode;
+    $("task-backend").disabled = ruleMode;
+    $("task-model").disabled = ruleMode;
     const b = $("task-backend").value,
       profile = config.profiles[b] || {},
       cache = taskModelLists.get(b);
@@ -494,16 +507,19 @@
       profile.revision,
       ids,
       profile.auto_select_model,
+      config.routing_policy?.enabled,
     ]);
     if (select.dataset.signature !== signature) {
       const fallback = el(
         "option",
         "",
-        profile.auto_select_model
-          ? "自动选择 · 按任务复杂度匹配"
-          : profile.model
-            ? `默认模型 · ${profile.model}`
-            : "使用默认模型",
+        config.routing_policy?.enabled
+          ? "请选择本次型号 · 跨代理规则已开启"
+          : profile.auto_select_model
+            ? "自动选择 · 按任务复杂度匹配"
+            : profile.model
+              ? `默认模型 · ${profile.model}`
+              : "使用默认模型",
       );
       fallback.value = "";
       select.replaceChildren(
@@ -519,7 +535,7 @@
     }
     select.dataset.backend = b;
     select.dataset.revision = profile.revision || "";
-    $("task-fetch-models").disabled = !profile.ready || loading;
+    $("task-fetch-models").disabled = ruleMode || !profile.ready || loading;
     text($("task-fetch-models"), loading ? "拉取中…" : "刷新模型");
     text(
       $("task-model-hint"),
@@ -530,11 +546,12 @@
           : "可刷新当前代理的模型列表；选择仅影响本次任务。",
     );
     $("task-complexity-field").hidden =
-      !profile.auto_select_model ||
-      Boolean(select.value) ||
+      (!profile.auto_select_model && !ruleMode) ||
+      (!ruleMode && Boolean(select.value)) ||
       $("task-kind").value === "connectivity";
   }
   async function loadTaskModels(force = false) {
+    if ($("task-selection-mode").value === "rules") return;
     const b = $("task-backend").value,
       profile = config.profiles[b] || {},
       revision = profile.revision;
@@ -614,7 +631,8 @@
     event.preventDefault();
     if ($("submit").disabled) return;
     const b = $("task-backend").value;
-    if (!config.profiles[b]?.ready) {
+    const ruleMode = $("task-selection-mode").value === "rules";
+    if (!ruleMode && !config.profiles[b]?.ready) {
       alert(
         "task-alert",
         "请先在连接设置中保存此代理的地址、Key 和模型。",
@@ -625,24 +643,47 @@
     $("submit").disabled = true;
     alert("task-alert", "正在提交任务…");
     try {
+      if (!ruleMode && config.routing_policy?.enabled && !$("task-model").value)
+        throw new Error(
+          "跨代理规则已开启。请明确选择本次型号，或切换到规则模式试选。",
+        );
+      if (
+        ruleMode &&
+        (!routeState?.preview || routeState.signature !== routeSignature())
+      )
+        throw new Error(
+          "请先为当前任务读取规则并试选；任务修改后需要重新试选。",
+        );
       const data = await request("tasks", {
         backend: b,
         project_dir: $("task-project").value.trim(),
         task: $("task-prompt").value,
         title: $("task-title").value.trim() || null,
         task_kind: $("task-kind").value,
-        model: $("task-model").value,
+        model: ruleMode ? "" : $("task-model").value,
+        routing_decision: ruleMode
+          ? {
+              token: routeState.context.token,
+              matched_intents: routeState.matched,
+              candidate_id: $("route-candidate").value,
+              reason:
+                $("route-reason").value.trim() ||
+                "用户在面板中判断意图并选择规则候选。",
+            }
+          : null,
         mode: document.querySelector("[name=mode]:checked").value,
         workspace_mode: $("task-workspace").value,
         timeout_seconds: Number($("task-timeout").value),
         task_complexity:
-          config.profiles[b]?.auto_select_model && !$("task-model").value
+          ruleMode ||
+          (config.profiles[b]?.auto_select_model && !$("task-model").value)
             ? $("task-kind").value === "connectivity"
               ? "simple"
               : $("task-complexity").value
             : null,
       });
       selected = data.job_id;
+      routeState = null;
       view = config.panel_context?.conversation_id ? "current" : "all";
       $("search").value = "";
       $("job-status").value = "all";
@@ -1325,13 +1366,14 @@
         fallback: "选型回退",
         explicit: "本次指定",
         default: "默认模型",
+        rules: "跨代理规则",
       },
       selection = job.model_selection;
     n.selection.hidden = !selection;
     if (selection)
       text(
         n.selection,
-        `${labels[selection.mode] || "模型选择"} · ${selection.reason || ""}${selection.default_model && selection.default_model !== job.model ? ` 默认模型仍为 ${selection.default_model}。` : ""}`,
+        `${labels[selection.mode] || "模型选择"}${selection.rule_name ? ` · ${selection.rule_name}${selection.fallback ? " · 已回退" : ""} · 版本 ${selection.policy_revision}` : ""} · ${selection.reason || ""}${selection.default_model && selection.default_model !== job.model ? ` 默认模型仍为 ${selection.default_model}。` : ""}`,
       );
     text(n.time, duration(job));
     text(
@@ -1907,7 +1949,573 @@
       renderArchiveControls();
     }
   };
-  const tabs = ["monitor", "task", "storage", "settings"];
+  const syncDrafts = new Map();
+  let ruleDraft = null,
+    rulesDirty = false,
+    rulesBusy = false,
+    ruleCatalog = [];
+  let selectionModeTouched = false,
+    routeState = null,
+    routeSequence = 0;
+  function renderLocalSync() {
+    const current = config.profiles[backend]?.local_sync || {
+      mode: "off",
+      revision: "initial",
+    };
+    let draft = syncDrafts.get(backend);
+    if (!draft) {
+      draft = {
+        mode: current.mode,
+        sources: [],
+        token: "",
+        fields: current.fields?.length
+          ? current.fields
+          : ["base_url", "api_key", "model", "effort"],
+      };
+      syncDrafts.set(backend, draft);
+    }
+    $("local-mode").value = draft.mode;
+    $("local-source").replaceChildren(
+      ...(draft.sources.length
+        ? draft.sources
+        : [{ source: { label: "请先检测" } }]
+      ).map((source) => {
+        const option = el(
+          "option",
+          "",
+          source.source.label + (source.error ? " · 无可用配置" : ""),
+        );
+        option.value = source.token || "";
+        option.disabled = Boolean(source.error);
+        return option;
+      }),
+    );
+    $("local-source").value = draft.token;
+    for (const node of document.querySelectorAll('[name="local-field"]'))
+      node.checked = draft.fields.includes(node.value);
+    text(
+      $("local-sync-status"),
+      current.message || "本地配置检测与同步已关闭。",
+    );
+    const source = draft.sources.find((s) => s.token === draft.token);
+    text(
+      $("local-source-info"),
+      source
+        ? [
+            ...(source.files || []),
+            `地址：${source.values?.base_url || "未发现"}`,
+            `模型：${source.values?.model || "未发现"}`,
+            `推理强度：${source.values?.effort || "默认"}`,
+            `API Key：${source.key_available ? "可导入（不回显）" : "未发现"}`,
+            ...(source.notes || []),
+          ].join("\n")
+        : "",
+    );
+  }
+  $("local-mode").onchange = () => {
+    syncDrafts.get(backend).mode = $("local-mode").value;
+  };
+  $("local-source").onchange = () => {
+    syncDrafts.get(backend).token = $("local-source").value;
+    renderLocalSync();
+  };
+  for (const node of document.querySelectorAll('[name="local-field"]'))
+    node.onchange = () => {
+      syncDrafts.get(backend).fields = [
+        ...document.querySelectorAll('[name="local-field"]:checked'),
+      ].map((n) => n.value);
+    };
+  $("local-detect").onclick = async () => {
+    if (busy) return;
+    const b = backend;
+    captureDraft();
+    settingsBusy(true);
+    alert("local-alert", "正在读取此客户端的用户级配置…");
+    try {
+      const data = await request("local-detect", { backend: b });
+      const draft = syncDrafts.get(b);
+      draft.sources = data.sources;
+      draft.token = data.sources.find((s) => s.token)?.token || "";
+      renderLocalSync();
+      alert(
+        "local-alert",
+        draft.token
+          ? "检测完成。选择来源、字段与同步方式后应用。"
+          : "未发现受支持的配置。",
+        draft.token ? "success" : "error",
+      );
+    } catch (error) {
+      alert("local-alert", error.message, "error");
+    } finally {
+      settingsBusy(false);
+    }
+  };
+  $("local-apply").onclick = async () => {
+    if (busy) return;
+    const b = backend,
+      draft = captureDraft(),
+      sync = syncDrafts.get(b);
+    if (draft.dirty) {
+      alert(
+        "local-alert",
+        "请先保存或重新加载连接草稿，再应用同步设置。",
+        "error",
+      );
+      return;
+    }
+    settingsBusy(true);
+    try {
+      const data = await request("local-sync", {
+        backend: b,
+        mode: sync.mode,
+        token: sync.token,
+        fields: sync.fields,
+        revision: config.profiles[b].revision,
+        sync_revision: config.profiles[b].local_sync?.revision || "initial",
+      });
+      ++configSequence;
+      syncDrafts.delete(b);
+      drafts.set(b, newDraft(data.profiles[b]));
+      acceptConfig(data);
+      settingsForm();
+      alert("local-alert", data.profiles[b].local_sync.message, "success");
+    } catch (error) {
+      alert("local-alert", error.message, "error");
+      if (error.status === 409) await refreshConfig().catch(() => {});
+    } finally {
+      settingsBusy(false);
+    }
+  };
+  function invalidateRoute() {
+    ++routeSequence;
+    routeState = null;
+    $("route-preview").disabled = true;
+    $("route-candidate").replaceChildren();
+    $("route-candidate").disabled = true;
+    text($("route-result"), "任务或配置变化后，请重新读取规则并试选。");
+  }
+  function acceptRules(value, force = false) {
+    value ||= { enabled: false, revision: "initial", rules: [], fallback: [] };
+    if (rulesBusy && !force) return;
+    if (ruleDraft?.revision === value.revision && !force) return;
+    invalidateRoute();
+    if (rulesDirty && !force) {
+      alert(
+        "rules-alert",
+        "规则已在其他窗口更新。草稿已保留，请记录修改后重新加载并合并。",
+        "error",
+      );
+      return;
+    }
+    ruleDraft = JSON.parse(JSON.stringify(value));
+    rulesDirty = false;
+    renderRules();
+  }
+  function changedRules() {
+    rulesDirty = true;
+    alert("rules-alert", "规则草稿未保存；新任务仍使用已保存规则。");
+  }
+  function poolSelect(select, values) {
+    const ids = [...new Set([...values, ...ruleCatalog.map((c) => c.id)])];
+    select.replaceChildren(
+      ...ids.map((id) => {
+        const candidate = ruleCatalog.find((c) => c.id === id);
+        const option = el(
+          "option",
+          "",
+          candidate
+            ? `${names[candidate.backend]} · ${candidate.model}`
+            : `待刷新或不可用 · ${id}`,
+        );
+        option.value = id;
+        option.selected = values.includes(id);
+        return option;
+      }),
+    );
+  }
+  function poolOrder(parent, values, update) {
+    const row = el("div", "row");
+    values.forEach((id, i) => {
+      const c = ruleCatalog.find((item) => item.id === id);
+      const up = button(`${i + 1}. ${c?.model || id} ↑`, () => {
+        const next = [...values];
+        [next[i - 1], next[i]] = [next[i], next[i - 1]];
+        update(next);
+      });
+      up.disabled = i === 0;
+      up.setAttribute("aria-label", `提高 ${c?.model || id} 的候选优先级`);
+      row.append(up);
+    });
+    parent.append(row);
+  }
+  function renderRules() {
+    if (!ruleDraft) return;
+    const focusedId = document.activeElement?.id;
+    $("rules-enabled").checked = ruleDraft.enabled;
+    $("rules-list").replaceChildren(
+      ...ruleDraft.rules.map((rule, index) => {
+        const card = el("div", "card rule-card");
+        card.append(el("h2", "", `规则 ${index + 1}`));
+        const field = (key, label, type = "input", options = null) => {
+          const wrap = el("div", "field"),
+            node = el(type),
+            id = `rule-${rule.id}-${key}`;
+          node.id = id;
+          const caption = el("label", "", label);
+          caption.htmlFor = id;
+          if (options)
+            node.replaceChildren(
+              ...options.map(([value, name]) => {
+                const o = el("option", "", name);
+                o.value = value;
+                return o;
+              }),
+            );
+          node.value = rule[key] || "";
+          node.oninput = () => {
+            rule[key] = node.value;
+            changedRules();
+          };
+          wrap.append(caption, node);
+          card.append(wrap);
+          return node;
+        };
+        const toggle = (key, label) => {
+          const wrap = el("label", "choice", label),
+            input = el("input");
+          input.type = "checkbox";
+          input.checked = rule[key];
+          input.onchange = () => {
+            rule[key] = input.checked;
+            changedRules();
+          };
+          wrap.prepend(input);
+          card.append(wrap);
+        };
+        field("name", "规则名称").maxLength = 100;
+        toggle("enabled", "启用此规则");
+        field("project_dir", "项目范围（空白适用所有项目）");
+        for (const [key, label, options] of [
+          [
+            "modes",
+            "任务权限",
+            [
+              ["review", "只读"],
+              ["edit", "编辑"],
+            ],
+          ],
+          [
+            "complexities",
+            "任务复杂度",
+            [
+              ["simple", "简单"],
+              ["standard", "常规"],
+              ["complex", "复杂"],
+            ],
+          ],
+          [
+            "task_kinds",
+            "任务类型",
+            [
+              ["general", "常规任务"],
+              ["connectivity", "连通性检测"],
+            ],
+          ],
+        ]) {
+          const wrap = el("fieldset", "field");
+          wrap.append(el("legend", "", label + "（均不选表示不限）"));
+          for (const [value, name] of options) {
+            const lab = el("label", "choice", name),
+              input = el("input");
+            input.type = "checkbox";
+            input.checked = (rule.conditions[key] || []).includes(value);
+            input.onchange = () => {
+              const list = new Set(rule.conditions[key] || []);
+              input.checked ? list.add(value) : list.delete(value);
+              rule.conditions[key] = [...list];
+              changedRules();
+            };
+            lab.prepend(input);
+            wrap.append(lab);
+          }
+          card.append(wrap);
+        }
+        field("intent", "任务意图（自然语言，可留空）", "textarea").maxLength =
+          2000;
+        field(
+          "preference",
+          "池内选择偏好（由 Codex 理解）",
+          "textarea",
+        ).maxLength = 2000;
+        const pool = field("candidates", "允许的候选（Ctrl 多选）", "select");
+        pool.multiple = true;
+        pool.size = 5;
+        pool.className = "rule-pool";
+        poolSelect(pool, rule.candidates);
+        pool.oninput = null;
+        pool.onchange = () => {
+          rule.candidates = [...pool.selectedOptions].map((o) => o.value);
+          changedRules();
+          renderRules();
+        };
+        poolOrder(card, rule.candidates, (values) => {
+          rule.candidates = values;
+          changedRules();
+          renderRules();
+        });
+        field(
+          "effort",
+          "推理强度（排除不支持的代理）",
+          "select",
+          ["", "low", "medium", "high", "xhigh", "max"].map((v) => [
+            v,
+            v || "沿用各代理设置",
+          ]),
+        );
+        toggle("allow_fallback", "无可用候选时继续后续匹配规则，再使用默认池");
+        const actions = el("div", "row");
+        for (const [label, step] of [
+          ["上移", -1],
+          ["下移", 1],
+        ]) {
+          const move = button(label, () => {
+            const i = index + step;
+            [ruleDraft.rules[index], ruleDraft.rules[i]] = [
+              ruleDraft.rules[i],
+              rule,
+            ];
+            changedRules();
+            renderRules();
+          });
+          move.disabled =
+            index + step < 0 || index + step >= ruleDraft.rules.length;
+          actions.append(move);
+        }
+        actions.append(
+          button("删除规则", () => {
+            ruleDraft.rules.splice(index, 1);
+            changedRules();
+            renderRules();
+          }),
+        );
+        card.append(actions);
+        return card;
+      }),
+    );
+    poolSelect($("rules-fallback"), ruleDraft.fallback);
+    $("fallback-order")?.remove();
+    const order = el("div");
+    order.id = "fallback-order";
+    poolOrder(order, ruleDraft.fallback, (values) => {
+      ruleDraft.fallback = values;
+      changedRules();
+      renderRules();
+    });
+    $("rules-fallback").after(order);
+    if (focusedId && $(focusedId) && document.activeElement !== $(focusedId))
+      $(focusedId).focus({ preventScroll: true });
+  }
+  $("rules-enabled").onchange = () => {
+    ruleDraft.enabled = $("rules-enabled").checked;
+    changedRules();
+  };
+  $("rules-fallback").onchange = () => {
+    ruleDraft.fallback = [...$("rules-fallback").selectedOptions].map(
+      (o) => o.value,
+    );
+    changedRules();
+    renderRules();
+  };
+  $("rules-add").onclick = () => {
+    ruleDraft.rules.push({
+      id: "rule-" + Date.now().toString(36) + "-" + ruleDraft.rules.length,
+      name: "新规则",
+      enabled: true,
+      project_dir: "",
+      conditions: {},
+      intent: "",
+      preference: "",
+      candidates: [],
+      effort: "",
+      allow_fallback: true,
+    });
+    changedRules();
+    renderRules();
+  };
+  async function rulesAction(action) {
+    if (rulesBusy) return;
+    rulesBusy = true;
+    const lock = () => {
+      for (const node of $("rules").querySelectorAll(
+        "input,select,textarea,button",
+      ))
+        node.disabled = true;
+    };
+    lock();
+    try {
+      if (action === "catalog") {
+        const listing = await request("routing-catalog", {});
+        ruleCatalog = listing.candidates;
+        text(
+          $("rules-catalog-status"),
+          `可用候选 ${ruleCatalog.length} 个。` +
+            listing.excluded
+              .map((e) => `${e.backend} ${e.model || ""}：${e.reason}`)
+              .join("；"),
+        );
+        renderRules();
+      } else {
+        const value = await request(
+          "routing",
+          action === "save"
+            ? { policy: ruleDraft, revision: ruleDraft.revision }
+            : undefined,
+        );
+        acceptRules(value, true);
+        config.routing_policy = value;
+        ++configSequence;
+        alert(
+          "rules-alert",
+          action === "save"
+            ? "规则已保存。新任务将读取此版本。"
+            : "已重新加载规则。",
+          "success",
+        );
+      }
+    } catch (error) {
+      alert("rules-alert", error.message, "error");
+    } finally {
+      rulesBusy = false;
+      for (const node of $("rules").querySelectorAll(
+        "input,select,textarea,button",
+      ))
+        node.disabled = false;
+      renderRules();
+    }
+  }
+  $("rules-catalog").onclick = () => rulesAction("catalog");
+  $("rules-save").onclick = () => rulesAction("save");
+  $("rules-reload").onclick = () => rulesAction("reload");
+  $("rules-try").onclick = () => {
+    selectionModeTouched = true;
+    $("task-selection-mode").value = "rules";
+    tab("task");
+  };
+  function routeTask() {
+    return {
+      task: $("task-prompt").value,
+      project_dir: $("task-project").value.trim(),
+      mode: document.querySelector('[name="mode"]:checked').value,
+      task_kind: $("task-kind").value,
+      task_complexity:
+        $("task-kind").value === "connectivity"
+          ? "simple"
+          : $("task-complexity").value,
+    };
+  }
+  function routeSignature() {
+    return JSON.stringify(routeTask());
+  }
+  $("task-selection-mode").onchange = () => {
+    selectionModeTouched = true;
+    invalidateRoute();
+    taskProfile();
+    loadTaskModels();
+  };
+  for (const id of [
+    "task-project",
+    "task-prompt",
+    "task-complexity",
+    "task-kind",
+  ])
+    for (const type of ["input", "change"])
+      $(id).addEventListener(type, invalidateRoute);
+  for (const radio of document.querySelectorAll('[name="mode"]'))
+    radio.addEventListener("change", invalidateRoute);
+  $("route-context").onclick = async () => {
+    invalidateRoute();
+    const sequence = routeSequence,
+      signature = routeSignature();
+    $("route-context").disabled = true;
+    text($("route-result"), "正在读取规则与模型列表…");
+    try {
+      const ctx = await request("routing-context", routeTask());
+      if (sequence !== routeSequence || signature !== routeSignature()) return;
+      if (!ctx.enabled) throw new Error("请先在选型规则中启用并保存规则。");
+      routeState = { context: ctx, signature, matched: [], preview: null };
+      $("route-intents").replaceChildren(el("legend", "", "手动判断任务意图"));
+      for (const rule of ctx.rules.filter((r) => r.intent)) {
+        const label = el("label", "choice", `${rule.name}：${rule.intent}`),
+          input = el("input");
+        input.type = "checkbox";
+        input.onchange = () => {
+          if (!routeState) return;
+          routeState.matched = [
+            ...$("route-intents").querySelectorAll("input:checked"),
+          ].map((n) => n.value);
+          routeState.preview = null;
+          $("route-candidate").replaceChildren();
+          text($("route-result"), "意图已变化，请重新试选。");
+        };
+        input.value = rule.id;
+        label.prepend(input);
+        $("route-intents").append(label);
+      }
+      $("route-preview").disabled = false;
+      text(
+        $("route-result"),
+        `已读取 ${ctx.rules.length} 条符合硬条件的规则。标记意图后点击试选；空意图自动匹配。`,
+      );
+    } catch (error) {
+      if (sequence === routeSequence) text($("route-result"), error.message);
+    } finally {
+      $("route-context").disabled = false;
+    }
+  };
+  $("route-preview").onclick = async () => {
+    const state = routeState,
+      matched = JSON.stringify(state?.matched);
+    if (!state) return;
+    $("route-preview").disabled = true;
+    try {
+      const result = await request("routing-preview", {
+        token: state.context.token,
+        matched_intents: state.matched,
+      });
+      if (
+        routeState !== state ||
+        JSON.stringify(state.matched) !== matched ||
+        state.signature !== routeSignature()
+      )
+        return;
+      state.preview = result;
+      $("route-candidate").replaceChildren(
+        ...result.pool.map((c) => {
+          const o = el("option", "", `${names[c.backend]} · ${c.model}`);
+          o.value = c.id;
+          return o;
+        }),
+      );
+      $("route-candidate").value = result.candidate_id;
+      $("route-candidate").disabled = false;
+      text(
+        $("route-result"),
+        `命中：${result.rule_name}\n偏好：${result.preference || "按候选顺序"}\n${result.reason}\n` +
+          result.trace
+            .map(
+              (r) =>
+                `${r.name}：排除 ${r.unavailable.length} 项` +
+                r.unavailable.map((c) => `\n  ${c.id}：${c.reason}`).join(""),
+            )
+            .join("\n"),
+      );
+    } catch (error) {
+      if (routeState === state) text($("route-result"), error.message);
+    } finally {
+      $("route-preview").disabled = !routeState;
+    }
+  };
+  const tabs = ["monitor", "task", "storage", "rules", "settings"];
   function tab(id) {
     activeTab = id;
     for (const name of tabs) {

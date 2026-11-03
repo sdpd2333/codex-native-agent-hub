@@ -32,6 +32,7 @@ if (-not $SkipMcpRegistration) {
 
 if ($InstallSkill) {
     & (Join-Path $PSScriptRoot 'scripts/install-nah-skill.ps1') -SkillsDir $SkillsDir
+    & (Join-Path $PSScriptRoot 'scripts/install-nah-skill.ps1') -SkillsDir $SkillsDir -SkillName nah-delegate
 }
 
 Write-Host 'Ready. Ask Codex to open the Native Agent Hub panel on the right, or run configure.cmd.'

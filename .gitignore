@@ -17,6 +17,8 @@ panel.json
 **/management.json
 storage-policy.json
 archive-policy.json
+local-sync.json
+routing.json
 .nah-skill-install.json
 *.log
 *.bak

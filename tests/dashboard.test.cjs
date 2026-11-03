@@ -10,6 +10,10 @@ const {
   deferred,
 } = require("./dashboard-fixture.cjs");
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+const change = (h, id, value) => {
+  if (value !== undefined) h.$(id).value = value;
+  h.$(id).dispatchEvent(new h.window.Event("change", { bubbles: true }));
+};
 async function until(predicate) {
   for (let i = 0; i < 80; i++) {
     if (predicate()) return;
@@ -17,6 +21,156 @@ async function until(predicate) {
   }
   assert.ok(predicate(), "Expected UI state did not arrive");
 }
+
+test("local import is opt-in, stays per-agent and preserves connection drafts", async (t) => {
+  const h = await harness(t);
+  assert.equal(
+    h.state.calls.some((c) => c.action === "local-detect"),
+    false,
+  );
+  h.$("tab-settings").click();
+  await tick();
+  change(h, "local-mode", "follow");
+  h.$("local-detect").click();
+  await until(() => h.$("local-alert").textContent.includes("检测完成"));
+  assert.match(h.$("local-source-info").textContent, /不回显/);
+  h.input("model", "unsaved-choice");
+  h.$("local-apply").click();
+  assert.match(h.$("local-alert").textContent, /先保存/);
+  assert.equal(
+    h.state.calls.some((c) => c.action === "local-sync"),
+    false,
+  );
+  h.$("reload-config").click();
+  await until(() => !h.$("local-apply").disabled);
+  h.$("local-apply").click();
+  await until(() => h.$("local-alert").textContent.includes("已应用"));
+  const call = h.state.calls.find((c) => c.action === "local-sync");
+  assert.equal(call.payload.mode, "follow");
+  assert.equal(call.payload.token, "detect-token");
+  assert.equal(call.payload.sync_revision, "sync-r1");
+  assert.equal("key" in call.payload, false);
+});
+
+test("rule drafts support order, exact candidate pools and stale-save conflicts", async (t) => {
+  const h = await harness(t);
+  h.$("tab-rules").click();
+  h.$("rules-catalog").click();
+  await until(() => h.$("rules-catalog-status").textContent.includes("2"));
+  h.$("rules-add").click();
+  const card = h.$("rules-list").firstChild;
+  const name = card.querySelector('input[id$="-name"]');
+  h.input(name.id, "复杂任务");
+  const pool = card.querySelector('select[id$="-candidates"]');
+  pool.options[1].selected = true;
+  pool.focus();
+  change(h, pool.id);
+  assert.equal(h.window.document.activeElement.id, pool.id);
+  h.$("rules-add").click();
+  const second = h.$("rules-list").lastChild;
+  [...second.querySelectorAll("button")]
+    .find((b) => b.textContent === "上移")
+    .click();
+  const enabled = h.$("rules-enabled");
+  enabled.checked = true;
+  change(h, "rules-enabled");
+  h.$("rules-save").click();
+  await until(
+    () =>
+      h.$("rules-alert").textContent.startsWith("规则已保存") &&
+      !h.$("rules-save").disabled,
+  );
+  assert.equal(h.state.config.routing_policy.rules[1].name, "复杂任务");
+  assert.equal(
+    h.state.config.routing_policy.rules[1].candidates[0],
+    "deepseek:" + "b".repeat(24),
+  );
+  const edit = h.$("rules-list").querySelector('input[id$="-name"]');
+  h.input(edit.id, "保留草稿");
+  h.state.config.routing_policy.revision = "other-window";
+  h.$("rules-save").click();
+  await until(() => h.$("rules-alert").textContent.includes("重新加载"));
+  assert.equal(h.$(edit.id).value, "保留草稿");
+});
+
+test("manual rule classification previews without execution and binds the submitted decision", async (t) => {
+  const state = fixture();
+  state.config.routing_policy.enabled = true;
+  state.config.routing_policy.rules = [
+    {
+      id: "intent",
+      name: "审查",
+      intent: "审查代码",
+      enabled: true,
+      candidates: ["claude:" + "a".repeat(24)],
+      conditions: {},
+      effort: "",
+      allow_fallback: true,
+    },
+  ];
+  const h = await harness(t, state);
+  h.$("tab-task").click();
+  await tick();
+  assert.equal(h.$("task-selection-mode").value, "rules");
+  assert.equal(h.$("task-backend").disabled, true);
+  h.input("task-prompt", "Review this code");
+  h.$("route-context").click();
+  await until(() => !h.$("route-preview").disabled);
+  const intent = h.$("route-intents").querySelector("input");
+  intent.checked = true;
+  intent.dispatchEvent(new h.window.Event("change", { bubbles: true }));
+  h.$("route-preview").click();
+  await until(() => !h.$("route-candidate").disabled);
+  assert.equal(
+    state.calls.some((c) => c.action === "tasks"),
+    false,
+  );
+  h.input("route-reason", "模型适合本次只读审查");
+  h.$("task-form").dispatchEvent(
+    new h.window.Event("submit", { bubbles: true, cancelable: true }),
+  );
+  await until(() => state.calls.some((c) => c.action === "tasks"));
+  const payload = state.calls.find((c) => c.action === "tasks").payload;
+  assert.deepEqual(payload.routing_decision.matched_intents, ["intent"]);
+  assert.equal(
+    payload.routing_decision.candidate_id,
+    "claude:" + "a".repeat(24),
+  );
+  assert.equal(payload.model, "");
+  assert.equal(payload.task_complexity, "standard");
+  assert.equal(payload.model_override_reason, undefined);
+});
+
+test("late rule contexts cannot authorize a changed task or connection", async (t) => {
+  const state = fixture();
+  state.config.routing_policy.enabled = true;
+  const h = await harness(t, state),
+    pending = deferred();
+  state.handlers["routing-context"] = () => pending.promise;
+  h.input("task-prompt", "Original task");
+  h.$("route-context").click();
+  h.input("task-prompt", "Different task");
+  pending.resolve({ enabled: true, token: "late", rules: [] });
+  await until(() => !h.$("route-context").disabled);
+  assert.equal(h.$("route-preview").disabled, true);
+  delete state.handlers["routing-context"];
+  h.$("route-context").click();
+  await until(() => !h.$("route-preview").disabled);
+  h.$("route-preview").click();
+  await until(() => !h.$("route-candidate").disabled);
+  state.config.profiles.claude.revision = "changed";
+  h.hide(true);
+  h.hide(false);
+  await until(() => h.$("route-candidate").disabled);
+  h.$("task-form").dispatchEvent(
+    new h.window.Event("submit", { bubbles: true, cancelable: true }),
+  );
+  await until(() => h.$("task-alert").textContent.includes("先为当前任务"));
+  assert.equal(
+    state.calls.some((c) => c.action === "tasks"),
+    false,
+  );
+});
 
 test("archive rules preserve drafts across polls, validate input and surface revision conflicts", async (t) => {
   const h = await harness(t);

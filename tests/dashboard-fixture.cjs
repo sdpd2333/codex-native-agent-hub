@@ -61,6 +61,13 @@ function fixture() {
         key_source: backend === "claude" ? "local" : "none",
         revision: `${backend}-r1`,
         runtime: `${backend} runtime`,
+        local_sync: {
+          mode: "off",
+          revision: "sync-r1",
+          fields: [],
+          status: "off",
+          message: "本地同步已关闭。",
+        },
       },
     ]),
   );
@@ -70,6 +77,12 @@ function fixture() {
       runtimes: {},
       default_project_dir: "C:/Projects/example",
       panel_context: { conversation_id: "fixture-chat" },
+      routing_policy: {
+        enabled: false,
+        revision: "rules-r1",
+        rules: [],
+        fallback: [],
+      },
     },
     jobs: [job("a", "completed"), job("b")],
     results: {},
@@ -248,6 +261,92 @@ function fixture() {
       };
     }
     if (action === "config" && !payload) return clone(state.config);
+    if (action === "local-detect")
+      return {
+        sources: [
+          {
+            token: "detect-token",
+            source: { label: "客户端配置" },
+            files: ["fixture/settings.json"],
+            values: {
+              base_url: "http://127.0.0.1:4321",
+              model: `${payload.backend}-imported`,
+              effort: "",
+            },
+            key_available: true,
+            auth: "api_key",
+            notes: [],
+          },
+        ],
+      };
+    if (action === "local-sync") {
+      const profile = state.config.profiles[payload.backend];
+      if (
+        payload.revision !== profile.revision ||
+        payload.sync_revision !== profile.local_sync.revision
+      )
+        throw Object.assign(new Error("同步设置已更新，请重新加载"), {
+          status: 409,
+        });
+      profile.local_sync = {
+        mode: payload.mode,
+        fields: payload.fields,
+        revision: "sync-r2",
+        status: "synced",
+        message: "已应用同步设置。",
+      };
+      profile.revision += "-synced";
+      return clone(state.config);
+    }
+    if (action === "routing") {
+      if (!payload) return clone(state.config.routing_policy);
+      if (payload.revision !== state.config.routing_policy.revision)
+        throw Object.assign(new Error("规则已更新，请重新加载"), {
+          status: 409,
+        });
+      state.config.routing_policy = {
+        ...clone(payload.policy),
+        revision: payload.revision + "-saved",
+      };
+      return clone(state.config.routing_policy);
+    }
+    if (action === "routing-catalog")
+      return {
+        candidates: [
+          {
+            id: "claude:" + "a".repeat(24),
+            backend: "claude",
+            model: "claude-fixture",
+          },
+          {
+            id: "deepseek:" + "b".repeat(24),
+            backend: "deepseek",
+            model: "deepseek-v4-pro",
+          },
+        ],
+        excluded: [],
+      };
+    if (action === "routing-context")
+      return {
+        ...clone(state.config.routing_policy),
+        token: "routing-token",
+        rules: state.config.routing_policy.rules,
+      };
+    if (action === "routing-preview")
+      return {
+        candidate_id: "claude:" + "a".repeat(24),
+        rule_name: "规则示例",
+        preference: "适合当前任务",
+        reason: "首个可用候选",
+        pool: [
+          {
+            id: "claude:" + "a".repeat(24),
+            backend: "claude",
+            model: "claude-fixture",
+          },
+        ],
+        trace: [{ name: "规则示例", unavailable: [] }],
+      };
     if (action === "config") {
       const current = state.config.profiles[payload.backend];
       if (payload.revision !== current.revision)

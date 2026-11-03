@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
              "node_modules", "outputs", "test-results"}
 PRIVATE_NAMES = {"key.dpapi", "settings.json", "runtime.json", "panel.json", "job.json", "management.json",
-                 "storage-policy.json", "archive-policy.json", ".nah-skill-install.json", ".env", "id_rsa", "id_ed25519"}
+                 "storage-policy.json", "archive-policy.json", "local-sync.json", "routing.json",
+                 ".nah-skill-install.json", ".env", "id_rsa", "id_ed25519"}
 PRIVATE_SUFFIXES = {".log", ".pem", ".key", ".p12", ".pfx", ".sqlite", ".sqlite3", ".bak", ".dpapi", ".jsonl"}
 PATTERNS = {
     "private-key block": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),

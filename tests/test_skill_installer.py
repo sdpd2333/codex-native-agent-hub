@@ -23,6 +23,7 @@ class SkillInstallerTests(unittest.TestCase):
         shutil.copyfile(ROOT / "scripts" / self.script.name, self.script)
         self.source = checkout / "skills" / "nah"
         shutil.copytree(ROOT / "skills" / "nah", self.source)
+        shutil.copytree(ROOT / "skills" / "nah-delegate", checkout / "skills" / "nah-delegate")
         self.skills = self.root / "skills with spaces"
         self.target = self.skills / "nah"
 
@@ -77,6 +78,16 @@ class SkillInstallerTests(unittest.TestCase):
         original = (self.source / "SKILL.md").read_bytes()
         self.install("-SkillsDir", str(self.source.parent), success=False)
         self.assertEqual((self.source / "SKILL.md").read_bytes(), original)
+
+    def test_delegation_skill_has_its_own_ownership_and_preserves_customizations(self):
+        self.install("-SkillsDir", str(self.skills), "-SkillName", "nah-delegate")
+        target = self.skills / "nah-delegate"
+        manifest = json.loads((target / ".nah-skill-install.json").read_text())
+        self.assertEqual(manifest['owner'], 'codex-native-agent-hub/nah-delegate')
+        self.assertIn('get_routing_context', (target / 'SKILL.md').read_text())
+        (target / 'SKILL.md').write_text('User custom rules')
+        self.install("-SkillsDir", str(self.skills), "-SkillName", "nah-delegate", success=False)
+        self.assertEqual((target / 'SKILL.md').read_text(), 'User custom rules')
 
 
 if __name__ == "__main__":

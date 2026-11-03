@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$SkillsDir = '')
+param([string]$SkillsDir = '', [ValidateSet('nah', 'nah-delegate')][string]$SkillName = 'nah')
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -10,8 +10,8 @@ if (-not $SkillsDir) {
     }
     $SkillsDir = Join-Path $codexRoot 'skills'
 }
-$source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../skills/nah'))
-$destination = [IO.Path]::GetFullPath((Join-Path $SkillsDir 'nah'))
+$source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../skills/$SkillName"))
+$destination = [IO.Path]::GetFullPath((Join-Path $SkillsDir $SkillName))
 if ($source -eq $destination) { throw 'Choose an installation directory outside the repository skill source.' }
 $files = @('SKILL.md', 'agents/openai.yaml')
 $manifestPath = Join-Path $destination '.nah-skill-install.json'
@@ -47,7 +47,7 @@ Assert-RegularPath $manifestPath
 $installed = $null
 if (Test-Path -LiteralPath $manifestPath) {
     $installed = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($installed.owner -ne 'codex-native-agent-hub/nah' -or $installed.version -ne 1) {
+    if ($installed.owner -ne "codex-native-agent-hub/$SkillName" -or $installed.version -ne 1) {
         throw 'The existing nah skill is not owned by this installer.'
     }
 } elseif (Test-Path -LiteralPath $destination) {
@@ -77,7 +77,7 @@ foreach ($relative in $files) {
 foreach ($relative in $files) {
     Write-AtomicBytes (Join-Path $destination $relative) ([IO.File]::ReadAllBytes((Join-Path $source $relative)))
 }
-$manifest = [ordered]@{ owner = 'codex-native-agent-hub/nah'; version = 1; files = $hashes } | ConvertTo-Json -Depth 4
+$manifest = [ordered]@{ owner = "codex-native-agent-hub/$SkillName"; version = 1; files = $hashes } | ConvertTo-Json -Depth 4
 Write-AtomicBytes $manifestPath ([Text.UTF8Encoding]::new($false).GetBytes($manifest + "`n"))
-Write-Host "Installed nah skill: $destination"
-Write-Host 'Use $nah or ask Codex to open NAH. Reload skills or start a new chat if it is not visible yet.'
+Write-Host "Installed $SkillName skill: $destination"
+Write-Host ('Use $' + $SkillName + '. Reload skills or start a new chat if it is not visible yet.')
