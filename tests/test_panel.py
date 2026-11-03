@@ -227,7 +227,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             job = await server.submit_task("poll live worker", str(APP))
             _, body, _ = await self.request("api/jobs")
             self.assertEqual(json.loads(body)["jobs"][0]["status"], "running")
-            self.assertEqual((await server.get_job(job["job_id"]))["status"], "running")
+            live = await server.get_job(job["job_id"])
+            self.assertEqual(live["status"], "running", live.get("error"))
             finished.set()
             self.assertEqual((await server.get_job(job["job_id"], wait_seconds=1))["status"], "completed")
 

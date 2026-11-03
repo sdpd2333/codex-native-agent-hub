@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import uuid
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -124,7 +125,16 @@ def _atomic_write(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
-        os.replace(temporary, path)
+        for attempt in range(6):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as exc:
+                # Windows readers (including a panel poll) can temporarily deny
+                # replacement. Keep the original intact and bound retries to 310 ms.
+                if getattr(exc, "winerror", None) not in (5, 32) or attempt == 5:
+                    raise
+                time.sleep(0.01 * 2 ** attempt)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
