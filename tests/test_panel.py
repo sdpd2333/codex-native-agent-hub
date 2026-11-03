@@ -77,7 +77,8 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         server.JOBS.clear()
         progress._trackers.clear()
         self.info = await server.get_panel(str(APP))
-        self.url = self.info["url"]
+        # Legacy endpoint remains global; scoped-panel isolation is tested separately below.
+        self.url = server.PANEL.url
 
     async def asyncTearDown(self):
         for job in list(server.JOBS.values()):
@@ -122,7 +123,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         config = json.loads(body)
         self.assertFalse(config["ready"])
         self.assertNotIn("key", config)
-        self.assertEqual(config["default_project_dir"], str(APP))
+        self.assertEqual(config["default_project_dir"], "")
         root = "http://" + server.PANEL.host
         self.assertEqual((await self.request(url=root + "/wrong/api/config"))[0], 404)
         self.assertEqual((await self.request("api/config", headers={"Host": "untrusted.invalid"}))[0], 403)
@@ -349,6 +350,60 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         for value in ("x" * 81, True, []):
             with self.assertRaisesRegex(common.RelayError, 'title'):
                 await server.submit_task('review', str(APP), title=value)
+
+    async def test_scoped_panels_keep_conversation_and_project_immutable(self):
+        first = await server.get_panel(str(APP), conversation_id="chat-a")
+        second = await server.get_panel(self.temp.name, conversation_id="chat-b")
+        self.assertNotEqual(first["url"], second["url"])
+        self.assertEqual((await server.get_panel(str(APP), "chat-a"))["url"], first["url"])
+        fresh = await server.get_panel(str(APP))
+        self.assertNotEqual(fresh["conversation_id"], self.info["conversation_id"])
+        for info, project, conversation in ((first, str(APP), "chat-a"), (second, self.temp.name, "chat-b")):
+            status, body, _ = await self.request(url=info["url"] + "api/config")
+            self.assertEqual(status, 200)
+            data = json.loads(body)
+            self.assertEqual(data["default_project_dir"], project)
+            self.assertEqual(data["panel_context"]["conversation_id"], conversation)
+        common.save_key("panel-fixture-credential")
+        common.save_settings("https://relay.example.com", "gemini-alias")
+        async def finish(job, *_args):
+            job.update(status="completed", result="scoped result", finished_at=progress.now())
+            progress.save_job(job)
+        with patch.object(server, "execute", new=finish):
+            status, body, _ = await self.request("", "POST", {
+                "task": "scoped task", "project_dir": str(APP), "conversation_id": "chat-b",
+                "_panel_context": {"conversation_id": "chat-b"}}, url=first["url"] + "api/tasks")
+            self.assertEqual(status, 200)
+            submitted = json.loads(body)
+            self.assertEqual(submitted["conversation_id"], "chat-a")
+            await server.get_job(submitted["job_id"], wait_seconds=1)
+        _, first_jobs, _ = await self.request(url=first["url"] + "api/jobs")
+        self.assertEqual(json.loads(first_jobs)["total"], 1)
+        _, second_jobs, _ = await self.request(url=second["url"] + "api/jobs")
+        self.assertEqual(json.loads(second_jobs)["total"], 0)
+        _, all_jobs, _ = await self.request("", "POST", {"view": "all"}, url=second["url"] + "api/jobs")
+        self.assertEqual(json.loads(all_jobs)["total"], 1)
+        status, body, _ = await self.request("", "POST", {"job_id": submitted["job_id"], "archived": True},
+                                            url=first["url"] + "api/archive")
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["archived"])
+        _, body, _ = await self.request("", "POST", {"view": "archived"}, url=second["url"] + "api/jobs")
+        self.assertEqual(json.loads(body)["total"], 1)
+
+    async def test_storage_routes_and_revision_conflicts(self):
+        status, body, _ = await self.request("api/storage")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["policy"]["retention_days"], 30)
+        payload = {"retention_days": 60, "revision": data["policy"]["revision"]}
+        self.assertEqual((await self.request("api/storage-policy", "POST", payload))[0], 200)
+        self.assertEqual((await self.request("api/storage-policy", "POST", payload))[0], 409)
+        status, body, _ = await self.request("api/storage-preview", "POST", {"retention_days": 60})
+        self.assertEqual(status, 200)
+        token = json.loads(body)["token"]
+        self.assertEqual((await self.request("api/storage-cleanup", "POST", {"token": token}))[0], 200)
+        self.assertEqual((await self.request("api/storage-cleanup", "POST", {"token": token}))[0], 400)
+        self.assertEqual((await self.request("api/storage-cleanup"))[0], 404)
 
 
 if __name__ == "__main__":

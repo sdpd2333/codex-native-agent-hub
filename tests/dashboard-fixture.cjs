@@ -32,6 +32,8 @@ function job(id, status = "running", overrides = {}) {
     status,
     can_cancel: status === "running",
     result_chars: 0,
+    conversation_id: "fixture-chat",
+    archived: false,
     progress: {
       phase: "读取文件",
       model_calls: 2,
@@ -67,6 +69,7 @@ function fixture() {
       profiles,
       runtimes: {},
       default_project_dir: "C:/Projects/example",
+      panel_context: { conversation_id: "fixture-chat" },
     },
     jobs: [job("a", "completed"), job("b")],
     results: {},
@@ -75,6 +78,15 @@ function fixture() {
     handlers: {},
     clipboard: "",
     updated: "2026-11-03T10:20:30Z",
+    storage: {
+      bytes: { records: 4096, logs: 8192, worktrees: 1024, other: 512 },
+      total_bytes: 13824,
+      job_count: 2,
+      file_count: 8,
+      skipped: 0,
+      partial: false,
+      policy: { retention_days: 30, revision: "storage-r1" },
+    },
   };
   state.results[state.jobs[0].job_id] = "完整结果🙂\n".repeat(12000);
   state.jobs[0].result_chars = Array.from(
@@ -88,8 +100,102 @@ function fixture() {
   state.api = async (action, payload) => {
     state.calls.push({ action, payload: clone(payload || {}) });
     if (state.handlers[action]) return state.handlers[action](payload);
-    if (action === "jobs")
-      return { jobs: clone(state.jobs), updated_at: state.updated };
+    if (action === "jobs") {
+      const {
+        view = "current",
+        status = "all",
+        search = "",
+        offset = 0,
+        limit = 50,
+      } = payload || {};
+      const matching = state.jobs.filter(
+        (job) =>
+          !!job.archived === (view === "archived") &&
+          (view !== "current" ||
+            job.conversation_id ===
+              state.config.panel_context?.conversation_id) &&
+          (status === "all" ||
+            status === job.status ||
+            (status === "attention" &&
+              ["failed", "timed_out", "interrupted"].includes(job.status))) &&
+          [
+            job.title,
+            job.job_id,
+            job.model,
+            job.backend,
+            job.project_dir,
+            job.conversation_id,
+          ].some((value) =>
+            String(value || "")
+              .toLowerCase()
+              .includes(search.toLowerCase()),
+          ),
+      );
+      const start = Math.min(
+        offset,
+        matching.length ? Math.floor((matching.length - 1) / limit) * limit : 0,
+      );
+      return {
+        jobs: clone(matching.slice(start, start + limit)),
+        total: matching.length,
+        offset: start,
+        next_offset: start + limit < matching.length ? start + limit : null,
+        running_count: state.jobs.filter((job) => job.status === "running")
+          .length,
+        other_running_count: state.jobs.filter(
+          (job) =>
+            job.status === "running" &&
+            job.conversation_id !== state.config.panel_context?.conversation_id,
+        ).length,
+        updated_at: state.updated,
+      };
+    }
+    if (action === "archive") {
+      const job = state.jobs.find((item) => item.job_id === payload.job_id);
+      if (job.status === "running") throw new Error("运行中的任务不能归档");
+      job.archived = payload.archived;
+      return clone(payload);
+    }
+    if (action === "storage") return clone(state.storage);
+    if (action === "storage-policy") {
+      if (payload.revision !== state.storage.policy.revision)
+        throw Object.assign(new Error("存储策略已更新"), { status: 409 });
+      state.storage.policy = {
+        retention_days: payload.retention_days,
+        revision: payload.revision + "-saved",
+      };
+      return clone(state.storage.policy);
+    }
+    if (action === "storage-preview")
+      return {
+        token: "preview-fixture",
+        expires_in: 300,
+        retention_days: payload.retention_days,
+        jobs: [
+          {
+            job_id: state.jobs[0].job_id,
+            title: state.jobs[0].title,
+            finished_at: state.jobs[0].finished_at,
+            bytes: 8192,
+            file_count: 2,
+          },
+        ],
+        job_count: 1,
+        file_count: 2,
+        bytes: 8192,
+        skipped: 0,
+      };
+    if (action === "storage-cleanup") {
+      state.storage.bytes.logs = 0;
+      state.storage.total_bytes -= 8192;
+      return {
+        jobs_cleaned: 1,
+        deleted_files: 2,
+        freed_bytes: 8192,
+        skipped_files: 0,
+        errors: 0,
+      };
+    }
     if (action === "config" && !payload) return clone(state.config);
     if (action === "config") {
       const current = state.config.profiles[payload.backend];

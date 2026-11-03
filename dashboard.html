@@ -94,7 +94,8 @@
       }
       nav {
         display: flex;
-        gap: 22px;
+        gap: 16px;
+        flex-wrap: wrap;
         margin-top: 19px;
       }
       nav button {
@@ -191,6 +192,66 @@
       }
       .jobs > .empty {
         grid-column: 1 / -1;
+      }
+      .view-controls,
+      .pager {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .view-controls .btn[aria-pressed="true"] {
+        color: var(--accent);
+        background: var(--tint);
+        border-color: var(--accent);
+      }
+      .view-controls select {
+        width: auto;
+      }
+      .context-note {
+        overflow-wrap: anywhere;
+        margin: 0 0 12px;
+      }
+      .job-column {
+        min-width: 0;
+      }
+      .pager {
+        margin-top: 12px;
+      }
+      .completed-group {
+        grid-column: 1 / -1;
+        min-width: 0;
+      }
+      .completed-group summary {
+        color: var(--muted);
+        padding: 6px 0 10px;
+        cursor: pointer;
+      }
+      .completed-jobs {
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+      }
+      .storage-metrics {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+      .storage-metrics .value {
+        font-size: 21px;
+      }
+      .cleanup-list {
+        padding-left: 20px;
+        max-height: 260px;
+        overflow-y: auto;
+        overflow-wrap: anywhere;
+      }
+      .detail-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 14px;
       }
       .sr-only {
         position: absolute;
@@ -740,6 +801,15 @@
           新建任务</button
         ><button
           type="button"
+          id="tab-storage"
+          tabindex="-1"
+          role="tab"
+          aria-selected="false"
+          aria-controls="storage"
+        >
+          存储管理</button
+        ><button
+          type="button"
           id="tab-settings"
           tabindex="-1"
           role="tab"
@@ -752,6 +822,47 @@
     </header>
     <main>
       <section id="monitor" role="tabpanel" aria-labelledby="tab-monitor">
+        <div class="view-controls" role="group" aria-label="任务视图">
+          <button
+            class="btn small"
+            id="view-current"
+            type="button"
+            aria-pressed="true"
+          >
+            本对话
+          </button>
+          <button
+            class="btn small"
+            id="view-all"
+            type="button"
+            aria-pressed="false"
+          >
+            全部任务
+          </button>
+          <button
+            class="btn small"
+            id="view-archived"
+            type="button"
+            aria-pressed="false"
+          >
+            已归档
+          </button>
+          <label class="sr-only" for="job-status">任务状态</label>
+          <select id="job-status">
+            <option value="all">所有状态</option>
+            <option value="running">运行中</option>
+            <option value="completed">已完成</option>
+            <option value="attention">需要关注</option>
+          </select>
+          <button
+            class="btn small"
+            id="other-running"
+            type="button"
+            hidden
+          ></button>
+        </div>
+        <p class="hint context-note" id="context-note"></p>
+        <div id="history-alert" class="alert" role="status" hidden></div>
         <div class="toolbar">
           <input
             type="search"
@@ -763,7 +874,18 @@
           ><button class="btn small" id="pause" type="button">暂停</button>
         </div>
         <div class="monitor">
-          <div class="jobs" id="jobs" aria-label="任务列表"></div>
+          <div class="job-column">
+            <div class="jobs" id="jobs" aria-label="任务列表"></div>
+            <div class="pager" aria-label="任务分页">
+              <button class="btn small" id="page-prev" type="button" disabled>
+                上一页
+              </button>
+              <span id="page-info" class="sub" role="status"></span>
+              <button class="btn small" id="page-next" type="button" disabled>
+                下一页
+              </button>
+            </div>
+          </div>
           <div
             id="monitor-status"
             class="sr-only"
@@ -776,6 +898,78 @@
               >选择任务以查看阶段、工具活动和执行结果。
             </div>
           </div>
+        </div>
+      </section>
+      <section
+        id="storage"
+        role="tabpanel"
+        aria-labelledby="tab-storage"
+        hidden
+      >
+        <div class="form">
+          <div class="section-row">
+            <h1>存储管理</h1>
+            <button class="btn small" id="storage-refresh" type="button">
+              刷新统计
+            </button>
+          </div>
+          <p class="intro">
+            查看本机所有对话的任务数据。归档仅整理列表；清理旧运行日志才能释放空间。
+          </p>
+          <div class="card">
+            <div id="storage-metrics" class="storage-metrics"></div>
+            <p class="hint" id="storage-note" role="status">
+              正在读取存储统计…
+            </p>
+          </div>
+          <div class="card">
+            <h2>旧运行日志</h2>
+            <p class="hint">
+              保留最近指定天数的日志。更早且已结束的任务可手动清理 SDK
+              日志和会话缓存，任务标题、描述、最终结果和编辑工作区仍会保留。
+            </p>
+            <div class="field">
+              <label for="retention-days">日志保留天数</label>
+              <input
+                id="retention-days"
+                type="number"
+                min="1"
+                max="3650"
+                step="1"
+                value="30"
+                required
+              />
+            </div>
+            <div class="row">
+              <button class="btn" id="storage-save" type="button" disabled>
+                保存保留天数
+              </button>
+              <button class="btn primary" id="storage-preview" type="button">
+                预览可清理内容
+              </button>
+            </div>
+            <p class="hint">
+              默认 30 天，不会自动删除。预览 5
+              分钟内有效，点击下方清理按钮后才会执行。
+            </p>
+            <div id="cleanup-preview" hidden>
+              <p id="cleanup-summary"></p>
+              <ul
+                id="cleanup-list"
+                class="cleanup-list"
+                aria-label="待清理任务"
+              ></ul>
+              <button
+                class="btn danger"
+                id="storage-cleanup"
+                type="button"
+                disabled
+              >
+                清理列出的运行日志
+              </button>
+            </div>
+          </div>
+          <div class="alert" id="storage-alert" role="status" hidden></div>
         </div>
       </section>
       <section id="task" role="tabpanel" aria-labelledby="tab-task" hidden>

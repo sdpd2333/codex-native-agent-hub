@@ -26,6 +26,7 @@ Codex / 本地面板
 - 按原生协议测试基础生成；通过任务验证流式响应与真实文件工具。
 - 默认只读审查；编辑任务默认创建独立 Git worktree，保留变更供检查和合并。
 - 查看实际阶段、工具活动、调用次数、耗时、结果和历史；支持取消与超时。
+- 按对话筛选任务、手动归档与恢复；查看存储占用，预览后清理旧运行日志。
 - 每个服务实例最多同时运行两个任务，每个任务限制 40 次模型调用、100 次工具调用。
 - Windows DPAPI 按当前用户加密凭据；状态、会话和 worktree 默认存储在仓库外。
 
@@ -57,7 +58,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipMcpRe
 
 > 打开 native-agent-hub 的统一面板，放在右侧，项目目录使用当前项目。
 
-Codex 调用 `get_panel(project_dir=项目绝对路径)`，再通过桌面应用的 `open_in_codex` 打开返回的 URL，设置 `target.type="browser"`、`placement="right"`。普通 MCP 客户端也可在浏览器打开同一面板。
+Codex 调用 `get_panel(project_dir=项目绝对路径, conversation_id=当前对话ID)`，再通过桌面应用的 `open_in_codex` 打开返回的 URL，设置 `target.type="browser"`、`placement="right"`。普通 MCP 客户端也可在浏览器打开同一面板。
 
 1. 在「连接设置」选择 Gemini、Claude 或 DeepSeek。
 2. 填写该代理使用的 **Base URL 和 API Key**，点击「拉取模型」，选择完整模型 ID 后保存。
@@ -69,7 +70,11 @@ Codex 调用 `get_panel(project_dir=项目绝对路径)`，再通过桌面应用
 
 切换代理会在当前页面保留未保存草稿（包括内存中的 Key）；关闭或刷新页面会清除草稿。如果其他面板或 MCP 已更新同一代理，保存会提示版本冲突，避免覆盖新配置。可记录需要的修改，点击「重新加载已保存配置」后合并。
 
-任务列表支持按源项目名和路径搜索，仅轮询最近 50 条任务摘要。选中任务后按需加载结果，可「加载更多」或「复制完整结果」。页面隐藏时暂停自动请求，暂停状态下仍可手动刷新。运行中读取的差异会标明可能过期，任务结束后自动更新一次；后续手动修改工作区仍需点击「刷新变更」。
+任务列表默认显示「本对话」，也可切换「全部任务」和「已归档」。运行中的任务优先显示，已完成任务可折叠；另有其他对话运行中任务的入口。搜索和状态筛选在分页前执行，每页最多 50 条摘要，可继续翻页查找旧任务。选中任务后按需加载描述和结果，可「加载更多」或「复制完整结果」。页面隐藏时暂停自动请求，暂停状态下仍可手动刷新。运行中读取的差异会标明可能过期，任务结束后自动更新一次；后续手动修改工作区仍需点击「刷新变更」。
+
+任务结束后可手动归档，归档任务可恢复；运行中任务不能归档。归档仅改变列表展示，不删除数据、不停止任务，也不释放磁盘空间。旧任务缺少对话 ID 时显示「未归属」，可在「全部任务」查找，不会猜测或批量归入当前对话。
+
+`get_panel` 和同一对话中的每次 `submit_task` 应传相同的 `conversation_id`。优先使用宿主提供的稳定对话 ID；宿主没有 ID 时，调用一次不带 ID 的 `get_panel`，在本对话后续调用中复用返回的 ID。每次不带 ID 打开面板都会生成新的归属标识，不能根据项目路径或上一个面板推断对话。未传 ID 的旧客户端任务保留为未归属。面板地址绑定固定的对话与默认项目，多个面板不会互相覆盖。
 
 任务标题与完整描述独立保存。可填写最多 80 字符的简短标题；省略时使用完整的短句或项目标签，不再把长提示词直接当标题。详情中的「任务描述」可展开查看全文，运行中的任务也可读取；描述仅在展开时加载，不进入列表轮询。历史任务若只保存了标题片段，会明确标注描述不完整，无法恢复旧版未保存的文字。
 
@@ -167,7 +172,7 @@ git -C <worktree路径> status --short
 | MCP 工具 | 用途 |
 | --- | --- |
 | `get_configuration(backend)` | 三套配置的就绪状态、所选模型和已安装 SDK 版本 |
-| `get_panel(project_dir)` | 获取本地统一面板地址，可预填项目路径 |
+| `get_panel(project_dir, conversation_id)` | 获取当前对话面板地址，可预填项目路径；返回对话 ID |
 | `list_models(backend, query)` | 拉取完整模型 ID，空查询返回所有模型 |
 | `select_model(model, backend)` | 按用户要求保存默认模型 |
 | `test_connection(backend)` | 用保存的配置测试原生文本生成，会使用接口额度 |
@@ -176,7 +181,7 @@ git -C <worktree路径> status --short
 | `get_changes(job_id)` | 读取工作区差异和新增文件名 |
 | `cancel_job(job_id)` | 终止本机工作进程树，保留文件修改 |
 
-`submit_task` 参数包括完整描述 `task`、可选短标题 `title`、绝对路径 `project_dir`、`backend=gemini|claude|deepseek`、`mode=review|edit`、`task_kind=general|connectivity`、可选 `model`（须配合 `model_override_reason`）、可选 `task_complexity=simple|standard|complex`、`workspace_mode=worktree|direct`、`timeout_seconds`。默认 Gemini、review、general、worktree，超时 600 秒（可设 10–1800 秒）。`get_job` 默认返回完整脱敏任务描述；轮询状态或结果分页时可传 `include_description=false` 减少重复传输。
+`submit_task` 参数包括完整描述 `task`、可选短标题 `title`、`conversation_id`、绝对路径 `project_dir`、`backend=gemini|claude|deepseek`、`mode=review|edit`、`task_kind=general|connectivity`、可选 `model`（须配合 `model_override_reason`）、可选 `task_complexity=simple|standard|complex`、`workspace_mode=worktree|direct`、`timeout_seconds`。默认 Gemini、review、general、worktree，超时 600 秒（可设 10–1800 秒）。`get_job` 默认返回完整脱敏任务描述；轮询状态或结果分页时可传 `include_description=false` 减少重复传输。
 
 ## 凭据与本地数据
 
@@ -185,11 +190,19 @@ git -C <worktree路径> status --short
 - `settings.json`：三套非密钥配置。
 - `<代理>.dpapi`：Windows 当前用户加密的 Key。
 - `jobs/`：任务摘要、原生会话及规范化活动。
+- `jobs/<任务ID>/management.json`：独立保存归档状态和清理后的活动摘要，后台任务更新不会覆盖它。
+- `storage-policy.json`：旧日志的保留天数，默认 30 天，可设 1–3650 天。
 - `worktrees/`：保留的编辑工作区。
 
 也支持 `AGENT_HUB_GEMINI_API_KEY`、`AGENT_HUB_CLAUDE_API_KEY`、`AGENT_HUB_DEEPSEEK_API_KEY`，环境变量优先于本地凭据。其他平台可用环境变量，但本项目的安装与原生集成测试范围为 Windows x64。
 
 Key 经工作进程 stdin 传入，不放进启动参数、任务摘要或前端存储。面板活动只含固定标签和计数；**原生会话日志与最终结果可能包含任务、文件内容和路径**，不要上传状态目录。配置的模型服务会接收任务和代理读取的内容。本机面板 URL 自带随机访问令牌，请勿公开或转发。
+
+「存储管理」按任务记录与结果、运行日志与会话缓存、编辑工作区、其他数据显示本机占用；统计只在打开页面或手动刷新时执行。数值为文件大小合计，链接、目录联接和无法读取的文件会跳过并提示统计不完整。
+
+日志清理为手动操作：选择保留天数 → 预览任务及预计释放空间 → 点击「清理列出的运行日志」。预览有效期为 5 分钟，限用一次；更新保留天数后需重新预览。只清理结束时间和文件修改时间都早于期限的 SDK 数据（任务目录中的 `runtime/`、`session/`、`claude/`、`dsh/`、`activity.jsonl`、`dsh-profile.yml`）。运行中、结束时间不明确、预览后变更的文件及含不安全链接的目录会跳过。清理不会自动发生，也不取决于任务是否归档。
+
+清理保留任务标题、描述、最终结果、活动摘要、全局连接配置、凭据及全部编辑工作区；任务目录中不在上述清理范围内的文件也不会删除。历史记录会继续积累，可随时查看；此功能主要控制通常占用更多空间的 SDK 日志与会话缓存。列表缓存只保留有数量上限的摘要，未变化的任务不会在每轮刷新时重新读取完整描述和结果。
 
 ## 开发与验证
 
@@ -202,9 +215,9 @@ npm test
 npm run test:browser
 ```
 
-单元测试覆盖独立凭据、配置快照、跨进程保存冲突、来源校验、结果分页、取消与超时、工具权限及 worktree 隔离。原生集成测试用真实 SDK 和运行组件连接本地模拟接口，验证三种代理的「读取 → 工具结果 → 回复」、文件写入及命令执行，检查实际进度与只读工具集；使用假 Key，不消耗模型服务额度。
+单元测试覆盖独立凭据、配置快照、跨进程保存冲突、来源校验、对话隔离、归档恢复、列表及结果分页、日志清理的预览与路径保护、取消与超时、工具权限及 worktree 隔离。原生集成测试用真实 SDK 和运行组件连接本地模拟接口，验证三种代理的「读取 → 工具结果 → 回复」、文件写入及命令执行，检查实际进度与只读工具集；使用假 Key，不消耗模型服务额度。
 
-前端开发检查需要 Node.js 24。`npm test` 用 jsdom 和延迟响应覆盖状态与请求竞态；`npm run test:browser` 默认使用本机 Edge，也可用 `BROWSER_EXECUTABLE` 指定 Chromium 系浏览器的可执行文件。浏览器检查覆盖 320、375、480、760、1024px 的三个页面、键盘与滚动交互，以及 axe 自动扫描；不替代人工读屏测试。模拟截图与检查记录保存在被 Git 忽略的 `outputs/validation/`。修复对应关系见 [审查修复清单](docs/review-fixes.md)。
+前端开发检查需要 Node.js 24。`npm test` 用 jsdom 和延迟响应覆盖状态与请求竞态；`npm run test:browser` 默认使用本机 Edge，也可用 `BROWSER_EXECUTABLE` 指定 Chromium 系浏览器的可执行文件。浏览器检查覆盖 320、375、480、760、1024px 的四个页面、键盘与滚动交互，以及 axe 自动扫描；不替代人工读屏测试。模拟截图与检查记录保存在被 Git 忽略的 `outputs/validation/`。修复对应关系见 [审查修复清单](docs/review-fixes.md)。
 
 GitHub Actions 在 Windows、Python 3.11 / 3.14 上执行后端检查，另设 Node.js 24 前端检查任务。模拟接口验证的是本项目与固定 SDK 的集成，不代表某个第三方中转服务已通过验证。Node.js 依赖只用于开发测试，运行面板不需要构建步骤。
 

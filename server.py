@@ -18,14 +18,15 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import common
 import dashboard
+import history
 import model_selection
 import progress
 import runtimes
+import storage
 import workspaces
 
 JOBS: dict[str, dict] = {}
 PANEL: dashboard.PanelServer | None = None
-DEFAULT_PROJECT_DIR = ""
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 NETWORK_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
 
@@ -91,6 +92,9 @@ mcp = FastMCP("native-agent-hub", lifespan=lifespan, instructions=
     "use the saved default unless the user explicitly requests another model. Never call select_model for automatic "
     "or one-task choices. Unknown names and catalog failures fall back to the saved default. "
     "Never request an API key in chat. Open the panel URL in a Codex right browser panel when available. "
+    "Pass this chat's stable host conversation/thread ID as conversation_id to get_panel and every submit_task. "
+    "If unavailable, call get_panel once without it and reuse the returned conversation_id within this chat. "
+    "Never reuse IDs from other chats or infer them from project paths or server processes. "
     "submit_task returns immediately; poll get_job. Review is read-only. Edit permits file changes and commands "
     "only within the user's authorized task; it defaults to a separate clean Git worktree. "
     "Inspect get_changes and results. Changes are not automatically committed or merged.")
@@ -113,7 +117,7 @@ def get_configuration(backend: Literal["gemini", "claude", "deepseek"] = "gemini
     """Read independent connection profiles and installed SDK versions. Never returns credentials."""
     common.check_backend(backend)
     return {**profile_status(backend), "profiles": {name: profile_status(name) for name in common.PROVIDERS},
-            "runtimes": runtimes.doctor(), "default_project_dir": DEFAULT_PROJECT_DIR,
+            "runtimes": runtimes.doctor(), "default_project_dir": "",
             "configuration_launcher": str(common.APP_DIR / "configure.cmd"),
             "note": "Connection tests check generation. A task also verifies streaming and native tool compatibility."}
 
@@ -127,15 +131,20 @@ def ensure_panel() -> dashboard.PanelServer:
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False))
-async def get_panel(project_dir: str = "") -> dict:
-    """Get the local connection/task/progress UI. Open url in a Codex right browser panel."""
-    global DEFAULT_PROJECT_DIR
+async def get_panel(project_dir: str = "", conversation_id: str = "") -> dict:
+    """Open a conversation-scoped local UI. Reuse the host chat ID for panel and task calls.
+
+    If no host ID is available, reuse the generated conversation_id returned here within this chat.
+    Calling without an ID creates a fresh view; history is still accessible under All tasks.
+    """
+    conversation_id = history.conversation_id(conversation_id) or uuid.uuid4().hex
     if project_dir:
         project = Path(project_dir)
         if not project.is_absolute() or not project.is_dir():
             raise common.RelayError("project_dir 必须是存在的绝对路径。")
-        DEFAULT_PROJECT_DIR = str(project.resolve())
-    return {"url": ensure_panel().url, "placement": "right", "runtimes": common.PROVIDERS}
+        project_dir = str(project.resolve())
+    return {"url": ensure_panel().register_context(conversation_id, project_dir),
+            "conversation_id": conversation_id, "placement": "right", "runtimes": common.PROVIDERS}
 
 
 def panel_credentials(payload: dict, backend: str) -> tuple[str, str, str]:
@@ -149,11 +158,25 @@ def panel_credentials(payload: dict, backend: str) -> tuple[str, str, str]:
 
 
 async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
+    context = payload.get("_panel_context", {})
+    conversation = context.get("conversation_id", "")
+    if action == "jobs":
+        return await asyncio.to_thread(history.query, conversation=conversation,
+            view=payload.get("view", "current" if conversation else "all"), search=payload.get("search", ""),
+            status=payload.get("status", "all"), offset=payload.get("offset", 0), limit=payload.get("limit", 50)) | {"updated_at": now()}
+    if action == "archive":
+        return await asyncio.to_thread(history.archive, payload.get("job_id", ""), payload.get("archived"))
+    if action == "storage" and method == "GET":
+        return await asyncio.to_thread(storage.overview)
+    if action == "storage-policy":
+        return await asyncio.to_thread(storage.save_policy, payload.get("retention_days"), payload.get("revision"))
+    if action == "storage-preview":
+        return await asyncio.to_thread(storage.preview, payload.get("retention_days"))
+    if action == "storage-cleanup":
+        return await asyncio.to_thread(storage.cleanup, payload.get("token"))
     if method == "GET":
-        if action == "jobs":
-            return {"jobs": await asyncio.to_thread(progress.list_jobs, include_result=False), "updated_at": now()}
         if action == "config":
-            return get_configuration()
+            return get_configuration() | {"panel_context": context, "default_project_dir": context.get("project_dir", "")}
     backend = common.check_backend(str(payload.get("backend", "gemini")))
     if action in ("config", "models", "test"):
         key = ""
@@ -182,7 +205,8 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
                 if entered:
                     common.save_key(entered, backend)
                 common.save_settings(base, profile["model"], backend, profile["effort"], automatic)
-            return {"ok": True, **get_configuration(backend)}
+            return {"ok": True, **get_configuration(backend), "panel_context": context,
+                    "default_project_dir": context.get("project_dir", "")}
         except common.ConfigurationConflict:
             raise
         except Exception as exc:
@@ -193,6 +217,7 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
             timeout_seconds=payload.get("timeout_seconds", 600), workspace_mode=payload.get("workspace_mode", "worktree"),
             task_complexity=payload.get("task_complexity"), title=payload.get("title"),
             task_kind=payload.get("task_kind", "general"),
+            conversation_id=conversation,
             model_override_reason="用户在新建任务面板中手动选择此型号。" if payload.get("model") else None)
     if action == "cancel":
         return await cancel_job(str(payload.get("job_id", "")))
@@ -310,7 +335,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
                       timeout_seconds: int = 600, workspace_mode: Literal["worktree", "direct"] = "worktree",
                       task_complexity: Literal["simple", "standard", "complex"] | None = None,
                       title: str | None = None, task_kind: Literal["general", "connectivity"] = "general",
-                      model_override_reason: str | None = None) -> dict:
+                      model_override_reason: str | None = None, conversation_id: str = "") -> dict:
     """Delegate through a native runtime; return a job ID immediately. Poll get_job for results.
 
     Review only exposes read tools. Edit permits project changes and commands and defaults to a
@@ -318,6 +343,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     the given directory. Edits are kept for review and never automatically merged or discarded.
 
     Supply a short title (up to 80 characters); task retains the full description separately.
+    Pass this chat's conversation_id from get_panel (or the host thread ID). Missing IDs stay unassigned.
     Pure connectivity/OK-only checks use task_kind=connectivity, mode=review and omit model.
     This fixes complexity to simple; actual debugging/review work uses task_kind=general.
     A model override requires model_override_reason quoting this task's explicit user model request.
@@ -327,6 +353,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     live IDs; saved defaults and reasoning effort stay unchanged. Disabled means use the default.
     """
     common.check_backend(backend)
+    conversation_id = history.conversation_id(conversation_id)
     if not isinstance(task, str) or not task.strip() or len(task) > 100000:
         raise common.RelayError("任务须为 1 到 100000 字符的文本。")
     if not isinstance(project_dir, str):
@@ -397,7 +424,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     panel = ensure_panel()
     description = common.redact(task, key)
     short_title = " ".join(title.split()) if title else ""
-    job = {"job_id": job_id, "status": "running", "backend": backend, "runtime": common.PROVIDERS[backend]["runtime"],
+    job = {"job_id": job_id, "conversation_id": conversation_id, "status": "running", "backend": backend, "runtime": common.PROVIDERS[backend]["runtime"],
            "model": profile["model"], "mode": mode, "project_dir": str(project.resolve()), "started_at": now(),
            "model_selection": selection, "task_kind": task_kind,
            "title": common.redact(short_title, key) if short_title else (
@@ -409,7 +436,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     # Profile and key are immutable per job and never included in persisted job metadata.
     job["future"] = asyncio.create_task(execute(job, task, timeout_seconds, profile.copy(), key, workspace_mode))
     return {name: value for name, value in job.items() if name not in ("future", "task_description") and not name.startswith("_")} | {
-        "dashboard_url": panel.url}
+        "dashboard_url": panel.register_context(conversation_id, str(project.resolve())) if conversation_id else panel.url}
 
 
 @mcp.tool(annotations=READ)

@@ -14,6 +14,8 @@ runtime/
 runtime.json
 panel.json
 **/job.json
+**/management.json
+storage-policy.json
 *.log
 *.bak
 *.pem

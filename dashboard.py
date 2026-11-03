@@ -21,6 +21,7 @@ class PanelServer:
         self.html = (html_path or common.APP_DIR / "dashboard.html").read_bytes()
         self.script = (common.APP_DIR / "dashboard.js").read_bytes()
         self.token = secrets.token_urlsafe(32)
+        self.contexts: dict[str, dict] = {}
         panel = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -53,6 +54,14 @@ class PanelServer:
                     self.reply(404, {"error": "面板地址已失效。请重新获取面板地址。"})
                     return
                 action = parsed.path[len(prefix):]
+                context = {}
+                if action.startswith("views/"):
+                    parts = action.split("/", 2)
+                    if len(parts) != 3 or parts[1] not in panel.contexts:
+                        self.reply(404, {"error": "对话面板地址已失效，请重新获取。"})
+                        return
+                    context = panel.contexts[parts[1]]
+                    action = parts[2]
                 if method == "GET" and action == "":
                     self.reply(200, panel.html, "text/html; charset=utf-8")
                     return
@@ -62,8 +71,9 @@ class PanelServer:
                 if method == "GET" and action == "api/health":
                     self.reply(200, {"ok": True, "application": "native-agent-hub"})
                     return
-                allowed = {"GET": {"api/jobs", "api/config"},
-                           "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes", "api/job"}}
+                allowed = {"GET": {"api/jobs", "api/config", "api/storage"},
+                           "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes", "api/job",
+                                    "api/jobs", "api/archive", "api/storage-policy", "api/storage-preview", "api/storage-cleanup"}}
                 if action not in allowed.get(method, set()):
                     self.reply(404, {"error": "接口不存在。"})
                     return
@@ -90,6 +100,7 @@ class PanelServer:
                     except (ValueError, UnicodeError):
                         self.reply(400, {"error": "请求 JSON 无效。"})
                         return
+                payload["_panel_context"] = dict(context)
                 future = asyncio.run_coroutine_threadsafe(panel.dispatch(method, action[4:], payload), panel.loop)
                 try:
                     value = future.result(timeout=150)
@@ -117,6 +128,15 @@ class PanelServer:
     def start(self):
         self.thread.start()
         return self
+
+    def register_context(self, conversation_id: str, project_dir: str = "") -> str:
+        context = {"conversation_id": conversation_id, "project_dir": project_dir}
+        for token, existing in self.contexts.items():
+            if existing == context:
+                return self.url + "views/" + token + "/"
+        token = secrets.token_urlsafe(24)
+        self.contexts[token] = context
+        return self.url + "views/" + token + "/"
 
     def close(self):
         self.http.shutdown()

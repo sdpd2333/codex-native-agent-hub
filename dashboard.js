@@ -38,6 +38,19 @@
     taskModelRequests = new Set();
   const cards = new Map(),
     states = new Map();
+  let view = "current",
+    listVersion = 0,
+    listOffset = 0,
+    listTotal = 0,
+    listNext = null,
+    listLoading = false;
+  const completedGroup = document.createElement("details"),
+    completedLabel = document.createElement("summary"),
+    completedJobs = document.createElement("div");
+  completedGroup.className = "completed-group";
+  completedJobs.className = "completed-jobs";
+  completedGroup.open = true;
+  completedGroup.append(completedLabel, completedJobs);
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -84,7 +97,17 @@
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(),
-      ["models", "test", "tasks", "changes"].includes(action) ? 155000 : 30000,
+      [
+        "models",
+        "test",
+        "tasks",
+        "changes",
+        "storage",
+        "storage-preview",
+        "storage-cleanup",
+      ].includes(action)
+        ? 155000
+        : 30000,
     );
     try {
       const response = await fetch(new URL("api/" + action, location.href), {
@@ -618,6 +641,11 @@
             : null,
       });
       selected = data.job_id;
+      view = config.panel_context?.conversation_id ? "current" : "all";
+      $("search").value = "";
+      $("job-status").value = "all";
+      listOffset = 0;
+      listVersion++;
       alert("task-alert", "");
       tab("monitor");
       await poll(true);
@@ -646,39 +674,57 @@
     text(node, statuses[status] || status);
   }
   function renderList() {
-    const query = $("search").value.trim().toLowerCase();
-    const list = jobs.filter((job) =>
-      [
-        job.title,
-        job.job_id,
-        job.model,
-        job.backend,
-        job.project_name,
-        job.project_dir,
-        job.workspace?.path,
-      ].some((value) =>
-        String(value || "")
-          .toLowerCase()
-          .includes(query),
-      ),
+    const query = $("search").value.trim(),
+      list = jobs;
+    for (const name of ["current", "all", "archived"])
+      $("view-" + name).setAttribute("aria-pressed", String(name === view));
+    text(
+      $("context-note"),
+      view === "current"
+        ? config.panel_context?.conversation_id
+          ? "仅显示本对话的任务；其他对话和未归属的旧任务可在「全部任务」查看。"
+          : "此面板未绑定对话，请从当前对话重新打开面板，或查看「全部任务」。"
+        : view === "archived"
+          ? "所有对话的归档任务，可随时恢复。归档不会释放存储空间。"
+          : "显示所有对话的未归档任务。未记录对话来源的旧任务标为「未归属」。",
+    );
+    $("page-prev").disabled = listLoading || listOffset === 0;
+    $("page-next").disabled = listLoading || listNext === null;
+    text(
+      $("page-info"),
+      listLoading
+        ? "正在加载…"
+        : listTotal
+          ? `${listOffset + 1}–${listOffset + list.length} / ${listTotal}`
+          : "0 个任务",
     );
     if (!list.length) {
       const empty = el("div", "empty");
       empty.append(
-        el("strong", "", query ? "没有匹配的任务" : "还没有任务"),
+        el(
+          "strong",
+          "",
+          listLoading
+            ? "正在加载任务…"
+            : query
+              ? "没有匹配的任务"
+              : "此视图暂无任务",
+        ),
         el(
           "p",
           "",
           query
             ? "试试其他关键词，或清除筛选。"
-            : "从「新建任务」开始一次委派。",
+            : view === "current"
+              ? "从「新建任务」开始，或切换到「全部任务」查看历史。"
+              : "可切换视图或状态筛选。",
         ),
       );
       if (query)
         empty.append(
           button("清除筛选", () => {
             $("search").value = "";
-            renderList();
+            changeList();
             $("search").focus();
           }),
         );
@@ -715,13 +761,29 @@
       card.node.setAttribute("aria-pressed", String(selected === job.job_id));
       text(card.title, job.title || "未命名任务");
       text(card.meta, `${names[job.backend] || job.backend} · ${job.model}`);
-      text(card.project, job.project_name || job.project_dir || "");
+      const owner = !job.conversation_id
+        ? "未归属"
+        : job.conversation_id === config.panel_context?.conversation_id
+          ? "本对话"
+          : "其他对话";
+      text(
+        card.project,
+        `${job.project_name || job.project_dir || ""} · ${owner}`,
+      );
       card.project.title = job.project_dir || "";
       setBadge(card.badge, job.status);
       text(card.time, duration(job));
       return card.node;
     });
-    reconcile($("jobs"), nodes);
+    const complete = nodes.filter(
+      (_, index) => list[index].status === "completed",
+    );
+    reconcile(completedJobs, complete);
+    text(completedLabel, `已完成 · 本页 ${complete.length} 个`);
+    reconcile($("jobs"), [
+      ...nodes.filter((_, index) => list[index].status !== "completed"),
+      ...(complete.length ? [completedGroup] : []),
+    ]);
   }
   function metric(label) {
     const node = el("div", "metric"),
@@ -733,6 +795,7 @@
     const state = {
       id,
       cancelPending: false,
+      archivePending: false,
       operationError: "",
       changes: null,
       changesPending: false,
@@ -759,17 +822,21 @@
     metrics.append(time.node, models.node, tools.node);
     const phase = el("div", "phase"),
       cancel = button("终止任务", () => cancelTask(state), "btn danger small");
-    cancel.style.marginTop = "14px";
+    const archive = button("归档任务", () => archiveTask(state)),
+      owner = el("div", "detail-meta"),
+      actions = el("div", "detail-actions");
+    actions.append(cancel, archive);
     const operation = el("div", "alert error");
     operation.setAttribute("role", "status");
     top.append(
       head,
       meta,
+      owner,
       el("div", "detail-meta", id),
       selection,
       metrics,
       phase,
-      cancel,
+      actions,
       operation,
     );
     const description = el("details", "card task-description"),
@@ -870,6 +937,8 @@
       tools: tools.value,
       phase,
       cancel,
+      archive,
+      owner,
       operation,
       error,
       workspace,
@@ -919,6 +988,29 @@
       state.operationError = error.message;
     } finally {
       state.cancelPending = false;
+      renderCurrent(state);
+    }
+  }
+  async function archiveTask(state) {
+    if (state.archivePending || state.job.status === "running") return;
+    state.archivePending = true;
+    state.operationError = "";
+    const archived = !state.job.archived;
+    renderCurrent(state);
+    try {
+      await request("archive", { job_id: state.id, archived });
+      alert(
+        "history-alert",
+        archived
+          ? "任务已归档，可在「已归档」中恢复。"
+          : "任务已恢复，可在「全部任务」或所属对话中查看。",
+        "success",
+      );
+      await poll(true);
+    } catch (error) {
+      state.operationError = error.message;
+    } finally {
+      state.archivePending = false;
       renderCurrent(state);
     }
   }
@@ -1187,7 +1279,7 @@
           "p",
           "",
           selected
-            ? "列表只保留最近 50 个任务。可刷新或选择其他任务。"
+            ? "任务可能已归档或不在本页，可切换视图、翻页或搜索。"
             : "选择任务以查看阶段、工具活动和执行结果。",
         ),
       );
@@ -1210,6 +1302,12 @@
       }
     }
     text(n.title, job.title || "任务详情");
+    text(
+      n.owner,
+      job.conversation_id
+        ? `对话：${job.conversation_id}${job.conversation_id === config.panel_context?.conversation_id ? " · 本对话" : ""}`
+        : "对话：未归属（旧任务或未提供对话标识）",
+    );
     setBadge(n.badge, job.status);
     text(
       n.meta,
@@ -1245,6 +1343,16 @@
     n.cancel.hidden = job.status !== "running" || !job.can_cancel;
     n.cancel.disabled = state.cancelPending;
     text(n.cancel, state.cancelPending ? "正在终止…" : "终止任务");
+    n.archive.disabled = state.archivePending || job.status === "running";
+    text(
+      n.archive,
+      state.archivePending
+        ? "正在更新…"
+        : job.archived
+          ? "恢复任务"
+          : "归档任务",
+    );
+    n.archive.title = job.status === "running" ? "运行中的任务不能归档" : "";
     text(n.operation, state.operationError);
     n.operation.hidden = !state.operationError;
     text(n.error, job.error);
@@ -1288,7 +1396,42 @@
     renderList();
     renderDetail();
   }
-  $("search").oninput = renderList;
+  function changeList() {
+    listVersion++;
+    listOffset = 0;
+    selected = null;
+    jobs = [];
+    listLoading = true;
+    alert("history-alert", "");
+    render();
+    poll(true);
+  }
+  $("search").oninput = changeList;
+  $("job-status").onchange = changeList;
+  for (const name of ["current", "all", "archived"])
+    $("view-" + name).onclick = () => {
+      view = name;
+      changeList();
+    };
+  $("other-running").onclick = () => {
+    view = "all";
+    $("job-status").value = "running";
+    $("search").value = "";
+    changeList();
+  };
+  function page(offset) {
+    listOffset = offset;
+    listVersion++;
+    selected = null;
+    jobs = [];
+    listLoading = true;
+    render();
+    poll(true);
+  }
+  $("page-prev").onclick = () => page(Math.max(0, listOffset - 50));
+  $("page-next").onclick = () => {
+    if (listNext !== null) page(listNext);
+  };
   function sync(message, error = false) {
     $("sync").replaceChildren(
       el("span", "dot" + (error ? " error" : "")),
@@ -1308,9 +1451,21 @@
     pollPromise = (async () => {
       do {
         pendingForce = false;
+        const version = listVersion;
         try {
-          const data = await request("jobs");
+          const data = await request("jobs", {
+            view,
+            search: $("search").value,
+            status: $("job-status").value,
+            offset: listOffset,
+            limit: 50,
+          });
+          if (version !== listVersion) continue;
+          listLoading = false;
           jobs = Array.isArray(data.jobs) ? data.jobs : [];
+          listTotal = data.total ?? jobs.length;
+          listOffset = data.offset ?? 0;
+          listNext = data.next_offset ?? null;
           if (!selected && jobs.length) selected = jobs[0].job_id;
           // Keep the current job's UI state even if it falls outside the bounded history list.
           const retained = new Set(jobs.map((job) => job.job_id));
@@ -1322,6 +1477,7 @@
             else if (
               id !== selected &&
               !state.cancelPending &&
+              !state.archivePending &&
               !state.changesPending &&
               !state.copying &&
               !state.description.pending &&
@@ -1332,12 +1488,21 @@
           render();
           text(
             $("running-count"),
-            jobs.filter((job) => job.status === "running").length,
+            data.running_count ??
+              jobs.filter((job) => job.status === "running").length,
+          );
+          $("other-running").hidden = !data.other_running_count;
+          text(
+            $("other-running"),
+            `其他对话 ${data.other_running_count || 0} 个任务运行中`,
           );
           lastUpdated = data.updated_at;
           failures = 0;
           syncUpdated();
         } catch (error) {
+          if (version !== listVersion) continue;
+          listLoading = false;
+          renderList();
           failures++;
           sync(
             paused
@@ -1369,7 +1534,202 @@
       syncUpdated();
     } else poll();
   };
-  const tabs = ["monitor", "task", "settings"];
+  let storageData = null,
+    storageBusy = "",
+    storagePreview = null,
+    storageEpoch = 0,
+    retentionDirty = false,
+    previewTimer;
+  function bytes(value) {
+    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let size = Number(value) || 0,
+      unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+      size /= 1024;
+      unit++;
+    }
+    return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+  }
+  function storageControls() {
+    $("storage-refresh").disabled = !!storageBusy;
+    $("storage-save").disabled = !!storageBusy || !storageData;
+    $("storage-preview").disabled = !!storageBusy;
+    $("storage-cleanup").disabled =
+      !!storageBusy || !storagePreview?.file_count;
+    $("retention-days").disabled = ["cleanup", "save"].includes(storageBusy);
+    text(
+      $("storage-refresh"),
+      storageBusy === "stats" ? "正在统计…" : "刷新统计",
+    );
+    text(
+      $("storage-preview"),
+      storageBusy === "preview" ? "正在预览…" : "预览可清理内容",
+    );
+    text(
+      $("storage-cleanup"),
+      storageBusy === "cleanup" ? "正在清理…" : "清理列出的运行日志",
+    );
+  }
+  function invalidatePreview() {
+    storageEpoch++;
+    storagePreview = null;
+    clearTimeout(previewTimer);
+    $("cleanup-preview").hidden = true;
+    storageControls();
+  }
+  function renderStorage() {
+    if (!storageData) return;
+    const labels = {
+      records: "任务记录与结果",
+      logs: "运行日志与会话缓存",
+      worktrees: "编辑工作区",
+      other: "其他配置与数据",
+    };
+    $("storage-metrics").replaceChildren(
+      ...Object.entries(labels).map(([key, label]) => {
+        const item = metric(label);
+        text(item.value, bytes(storageData.bytes[key]));
+        return item.node;
+      }),
+    );
+    text(
+      $("storage-note"),
+      `共 ${storageData.job_count} 个任务，占用 ${bytes(storageData.total_bytes)}（文件大小合计）。${storageData.partial ? `有 ${storageData.skipped} 项无法读取或为链接，统计不完整。` : ""}`,
+    );
+  }
+  async function loadStorage() {
+    if (storageBusy) return;
+    storageBusy = "stats";
+    invalidatePreview();
+    alert("storage-alert", "");
+    try {
+      storageData = await request("storage");
+      if (!retentionDirty)
+        $("retention-days").value = storageData.policy.retention_days;
+      renderStorage();
+    } catch (error) {
+      text($("storage-note"), "统计读取失败，可点击刷新重试。");
+      alert("storage-alert", error.message, "error");
+    } finally {
+      storageBusy = "";
+      storageControls();
+    }
+  }
+  function retentionDays() {
+    const input = $("retention-days"),
+      days = Number(input.value);
+    if (
+      !input.checkValidity() ||
+      !Number.isInteger(days) ||
+      days < 1 ||
+      days > 3650
+    ) {
+      input.reportValidity();
+      throw new Error("请输入 1 到 3650 之间的整数天数。");
+    }
+    return days;
+  }
+  $("retention-days").oninput = () => {
+    retentionDirty = true;
+    invalidatePreview();
+  };
+  $("storage-refresh").onclick = loadStorage;
+  $("storage-save").onclick = async () => {
+    if (storageBusy || !storageData) return;
+    try {
+      const days = retentionDays();
+      storageBusy = "save";
+      invalidatePreview();
+      storageData.policy = await request("storage-policy", {
+        retention_days: days,
+        revision: storageData.policy.revision,
+      });
+      retentionDirty = false;
+      alert(
+        "storage-alert",
+        "已保存保留天数。日志仅在预览并点击清理后删除。",
+        "success",
+      );
+    } catch (error) {
+      alert("storage-alert", error.message, "error");
+    } finally {
+      storageBusy = "";
+      storageControls();
+    }
+  };
+  $("storage-preview").onclick = async () => {
+    if (storageBusy) return;
+    let epoch;
+    try {
+      const days = retentionDays();
+      storageBusy = "preview";
+      invalidatePreview();
+      epoch = storageEpoch;
+      alert("storage-alert", "");
+      const data = await request("storage-preview", { retention_days: days });
+      if (epoch !== storageEpoch) return;
+      storagePreview = data;
+      $("cleanup-preview").hidden = false;
+      text(
+        $("cleanup-summary"),
+        `${data.job_count} 个任务、${data.file_count} 个日志文件，预计释放 ${bytes(data.bytes)}。${data.skipped ? `已跳过 ${data.skipped} 项较新、不可读或不适合清理的数据。` : ""}`,
+      );
+      $("cleanup-list").replaceChildren(
+        ...data.jobs.map((job) =>
+          el(
+            "li",
+            "",
+            `${job.title} · ${new Date(job.finished_at).toLocaleDateString("zh-CN")} · ${bytes(job.bytes)}`,
+          ),
+        ),
+      );
+      if (!data.file_count)
+        alert("storage-alert", "没有符合保留天数的旧运行日志。");
+      previewTimer = setTimeout(() => {
+        if (storagePreview === data) {
+          invalidatePreview();
+          alert("storage-alert", "预览已过期，请重新预览后清理。");
+        }
+      }, data.expires_in * 1000);
+    } catch (error) {
+      if (epoch === undefined || epoch === storageEpoch)
+        alert("storage-alert", error.message, "error");
+    } finally {
+      storageBusy = "";
+      storageControls();
+    }
+  };
+  $("storage-cleanup").onclick = async () => {
+    if (storageBusy || !storagePreview?.file_count) return;
+    const token = storagePreview.token;
+    let completedMessage = "";
+    storageBusy = "cleanup";
+    invalidatePreview();
+    alert("storage-alert", "正在清理预览中的旧运行日志…");
+    try {
+      const data = await request("storage-cleanup", { token });
+      completedMessage = `已清理 ${data.jobs_cleaned} 个任务的 ${data.deleted_files} 个日志文件，释放 ${bytes(data.freed_bytes)}。跳过 ${data.skipped_files} 个文件，${data.errors} 个错误。任务记录、结果和编辑工作区已保留。`;
+      alert(
+        "storage-alert",
+        completedMessage,
+        data.errors ? "error" : "success",
+      );
+      storageData = await request("storage");
+      renderStorage();
+    } catch (error) {
+      alert(
+        "storage-alert",
+        completedMessage
+          ? `${completedMessage} 最新统计读取失败：${error.message} 请刷新统计。`
+          : `${error.message} 请刷新统计并重新预览。`,
+        "error",
+      );
+    } finally {
+      storageBusy = "";
+      storageControls();
+    }
+  };
+  const tabs = ["monitor", "task", "storage", "settings"];
   function tab(id) {
     activeTab = id;
     for (const name of tabs) {
@@ -1378,7 +1738,9 @@
       $("tab-" + name).tabIndex = name === id ? 0 : -1;
     }
     if (id === "monitor") render();
-    else {
+    else if (id === "storage") {
+      if (!storageData) loadStorage();
+    } else {
       if (id === "task") taskProfile();
       refreshForTab();
     }
@@ -1420,6 +1782,7 @@
   async function init() {
     try {
       await refreshConfig();
+      if (!config.panel_context?.conversation_id) view = "all";
       if (config.default_project_dir)
         $("task-project").value = config.default_project_dir;
       if (!Object.values(config.profiles).some((profile) => profile.ready)) {

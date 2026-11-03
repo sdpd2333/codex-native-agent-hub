@@ -15,7 +15,7 @@ import common
 from events import read_activity
 
 JOB_ID = re.compile(r"[0-9a-f]{16}\Z")
-PUBLIC_FIELDS = ("job_id", "title", "task_description", "task_kind", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "status", "started_at",
+PUBLIC_FIELDS = ("job_id", "title", "task_description", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "status", "started_at",
                  "finished_at", "result", "error", "_pid", "_control_url")
 TOOL_LABELS = {
     "view_file": "读取文件", "list_dir": "浏览目录", "search_dir": "搜索目录",
@@ -72,6 +72,32 @@ def load_job(job_id: str) -> dict | None:
         return {key: data[key] for key in PUBLIC_FIELDS if key in data}
     except (OSError, ValueError):
         return None
+
+
+def load_management(job_id: str) -> dict:
+    path = job_dir(job_id) / "management.json"
+    try:
+        if path.stat().st_size > 65536:
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def update_management(job_id: str, **values) -> dict:
+    # A sidecar prevents a running/older service's save_job from undoing an archive.
+    with common.configuration_lock():
+        data = load_management(job_id) | values
+        common._atomic_write(job_dir(job_id) / "management.json", json.dumps(data, ensure_ascii=False).encode("utf-8"))
+        return data
+
+
+def effective_status(job: dict) -> str:
+    status = job.get("status", "interrupted")
+    if status == "running" and not process_alive(job.get("_pid", os.getpid())):
+        return "interrupted"
+    return status
 
 
 def process_alive(pid: int) -> bool:
@@ -202,23 +228,27 @@ def snapshot(job: dict, *, include_result: bool = True) -> dict:
 
 def _snapshot(job: dict, *, include_result: bool = True) -> dict:
     job_id = job["job_id"]
+    management = load_management(job_id)
     if job_id not in _trackers:
         if len(_trackers) >= 60:
             _trackers.pop(next(iter(_trackers)))
         _trackers[job_id] = TranscriptTracker()
-    activity = (_trackers[job_id].update(job_dir(job_id)) if job.get("backend", "gemini") == "gemini"
-                else read_activity(job_dir(job_id) / "activity.jsonl"))
-    status = job.get("status", "interrupted")
-    if status == "running" and not process_alive(job.get("_pid", os.getpid())):
-        status = "interrupted"
+    activity = management.get("activity_summary") if management.get("logs_cleaned_at") else None
+    if not isinstance(activity, dict):
+        activity = (_trackers[job_id].update(job_dir(job_id)) if job.get("backend", "gemini") == "gemini"
+                    else read_activity(job_dir(job_id) / "activity.jsonl"))
+    activity = dict(activity)
+    status = effective_status(job)
     if status != "running":
         activity["phase"] = FINAL_LABELS.get(status, status)
-    data = {key: job[key] for key in ("job_id", "task_kind", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error")
+    data = {key: job[key] for key in ("job_id", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error")
             if key in job}
-    data.update(title=display_title(job), status=status, project_name=Path(job.get("project_dir", "")).name,
-                progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")))
+    data.update(title=job.get("_display_title") or display_title(job), status=status, project_name=Path(job.get("project_dir", "")).name,
+                progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")),
+                archived=bool(management.get("archived_at")), archived_at=management.get("archived_at"),
+                logs_cleaned_at=management.get("logs_cleaned_at"))
     text = str(job.get("result", ""))
-    data["result_chars"] = len(text)
+    data["result_chars"] = job.get("_result_chars", len(text))
     if include_result and "result" in job:
         data.update(result=text[:50000], result_truncated=len(text) > 50000)
     return data

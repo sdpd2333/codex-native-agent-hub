@@ -78,7 +78,7 @@ async function main() {
     );
     for (const width of [320, 375, 480, 760, 1024]) {
       await page.setViewportSize({ width, height: 900 });
-      for (const tab of ["monitor", "task", "settings"]) {
+      for (const tab of ["monitor", "task", "storage", "settings"]) {
         await page.locator(`#tab-${tab}`).click();
         await page.waitForTimeout(80);
         const dimensions = await page.evaluate(() => ({
@@ -107,7 +107,7 @@ async function main() {
           assert.equal(titleStyle.clamp, "none");
           assert.equal(titleStyle.overflow, false);
           const listTitle = await page
-            .locator(".job-title")
+            .locator(`[data-job-id="${state.jobs[0].job_id}"] .job-title`)
             .first()
             .evaluate((node) => ({
               text: node.textContent,

@@ -398,14 +398,198 @@ test("keyboard tabs, task selection, provider ARIA and terminal duration are con
 test("project search distinguishes an empty filter from empty task history", async (t) => {
   const h = await harness(t);
   h.input("search", "C:/Projects/project-b");
+  await until(() => h.$("jobs").querySelectorAll(".job").length === 1);
   assert.equal(h.$("jobs").querySelectorAll(".job").length, 1);
   h.input("search", "no-match");
+  await until(() => h.$("jobs").textContent.includes("没有匹配的任务"));
   assert.match(h.$("jobs").textContent, /没有匹配的任务/);
   h.$("jobs").querySelector("button").click();
+  await until(() => h.$("jobs").querySelectorAll(".job").length === 2);
   assert.equal(h.$("jobs").querySelectorAll(".job").length, 2);
   h.state.jobs = [];
   await h.refresh();
-  assert.match(h.$("jobs").textContent, /还没有任务/);
+  assert.match(h.$("jobs").textContent, /此视图暂无任务/);
+});
+
+test("conversation views isolate legacy tasks, show other running work and restore archives", async (t) => {
+  const state = fixture();
+  state.jobs.push(
+    job("d", "running", { conversation_id: "other-chat" }),
+    job("e", "completed", { conversation_id: "" }),
+  );
+  const h = await harness(t, state);
+  assert.equal(h.$("jobs").querySelectorAll(".job").length, 2);
+  assert.match(h.$("other-running").textContent, /1 个任务运行中/);
+  assert.equal(h.$("view-current").getAttribute("aria-pressed"), "true");
+  h.findButton("归档任务").click();
+  await until(() => h.$("history-alert").textContent.includes("已归档"));
+  await until(() => h.$("jobs").querySelectorAll(".job").length === 1);
+  h.$("view-archived").click();
+  await until(() => h.findButton("恢复任务"));
+  assert.equal(h.$("jobs").querySelectorAll(".job").length, 1);
+  h.findButton("恢复任务").click();
+  await until(() => !state.jobs[0].archived);
+  h.$("view-all").click();
+  await until(() => h.$("jobs").querySelectorAll(".job").length === 4);
+  assert.match(h.$("jobs").textContent, /未归属/);
+  h.$("other-running").click();
+  await until(() => h.$("jobs").querySelectorAll(".job").length === 2);
+  assert.equal(h.$("job-status").value, "running");
+  assert.equal(h.findButton("归档任务").disabled, true);
+});
+
+test("a late list response cannot refill a different view or search", async (t) => {
+  const h = await harness(t),
+    pending = deferred();
+  h.state.handlers.jobs = () => pending.promise;
+  h.$("refresh").click();
+  await tick();
+  h.$("view-archived").click();
+  h.input("search", "archived-only");
+  delete h.state.handlers.jobs;
+  pending.resolve({
+    jobs: clone(h.state.jobs),
+    total: 2,
+    updated_at: h.state.updated,
+  });
+  await until(() => h.$("jobs").textContent.includes("没有匹配的任务"));
+  assert.equal(h.$("jobs").querySelectorAll(".job").length, 0);
+  assert.equal(h.$("view-archived").getAttribute("aria-pressed"), "true");
+  const last = h.state.calls
+    .filter((call) => call.action === "jobs")
+    .at(-1).payload;
+  assert.equal(last.view, "archived");
+  assert.equal(last.search, "archived-only");
+});
+
+test("server pagination and searching find tasks beyond the first fifty", async (t) => {
+  const state = fixture();
+  for (let index = 3; index <= 62; index++)
+    state.jobs.push(
+      job("d", "completed", {
+        job_id: index.toString(16).padStart(16, "0"),
+        title: `History ${index}`,
+      }),
+    );
+  const h = await harness(t, state);
+  assert.equal(h.$("jobs").querySelectorAll(".job").length, 50);
+  h.$("page-next").click();
+  await until(() => h.$("page-info").textContent === "51–62 / 62");
+  assert.equal(h.$("page-next").disabled, true);
+  h.input("search", "History 61");
+  await until(() => h.$("page-info").textContent === "1–1 / 1");
+  assert.match(h.$("jobs").textContent, /History 61/);
+  assert.equal(h.$("page-prev").disabled, true);
+});
+
+test("completed groups remain collapsed while running tasks stay visible", async (t) => {
+  const h = await harness(t),
+    group = h.$("jobs").querySelector("details");
+  group.open = false;
+  h.state.jobs[1].progress.tool_calls++;
+  await h.refresh();
+  assert.equal(h.$("jobs").querySelector("details"), group);
+  assert.equal(group.open, false);
+  assert.equal(group.querySelectorAll(".job").length, 1);
+  assert.equal(
+    h.$("jobs").querySelector(":scope > .job").dataset.jobId,
+    "b".repeat(16),
+  );
+});
+
+test("storage uses a reviewed preview before cleanup and preserves editable retention on refresh", async (t) => {
+  const h = await harness(t);
+  h.$("tab-storage").click();
+  await until(() => !h.$("storage-save").disabled);
+  assert.match(h.$("storage-note").textContent, /2 个任务/);
+  assert.equal(h.$("storage-cleanup").disabled, true);
+  h.input("retention-days", "90");
+  h.$("storage-refresh").click();
+  await until(() => !h.$("storage-refresh").disabled);
+  assert.equal(h.$("retention-days").value, "90");
+  h.$("storage-save").click();
+  await until(() => h.state.storage.policy.retention_days === 90);
+  await until(() => !h.$("storage-preview").disabled);
+  h.$("storage-preview").click();
+  await until(() => !h.$("storage-cleanup").disabled);
+  assert.match(h.$("cleanup-summary").textContent, /1 个任务、2 个日志文件/);
+  assert.equal(
+    h.state.calls.some((call) => call.action === "storage-cleanup"),
+    false,
+  );
+  h.$("storage-cleanup").click();
+  await until(() => h.$("storage-alert").textContent.includes("已清理"));
+  await until(() => !h.$("storage-refresh").disabled);
+  assert.equal(h.$("storage-cleanup").disabled, true);
+  assert.equal(h.state.storage.bytes.logs, 0);
+  assert.ok(h.state.jobs[0].result_chars > 0);
+});
+
+test("changing retention invalidates an in-flight preview and stale errors", async (t) => {
+  const h = await harness(t);
+  h.$("tab-storage").click();
+  await until(() => !h.$("storage-save").disabled);
+  const pending = deferred();
+  h.state.handlers["storage-preview"] = () => pending.promise;
+  h.$("storage-preview").click();
+  h.input("retention-days", "60");
+  pending.resolve({
+    token: "stale",
+    file_count: 10,
+    job_count: 1,
+    bytes: 100,
+    jobs: [],
+    expires_in: 300,
+  });
+  await until(() => !h.$("storage-preview").disabled);
+  assert.equal(h.$("cleanup-preview").hidden, true);
+  assert.equal(h.$("storage-cleanup").disabled, true);
+  delete h.state.handlers["storage-preview"];
+  h.$("storage-preview").click();
+  await until(() => !h.$("storage-cleanup").disabled);
+  h.input("retention-days", "120");
+  assert.equal(h.$("storage-cleanup").disabled, true);
+});
+
+test("cleanup failures consume the UI preview and repeated clicks send only one request", async (t) => {
+  const h = await harness(t);
+  h.$("tab-storage").click();
+  await until(() => !h.$("storage-save").disabled);
+  h.$("storage-preview").click();
+  await until(() => !h.$("storage-cleanup").disabled);
+  const pending = deferred();
+  h.state.handlers["storage-cleanup"] = () => pending.promise;
+  h.$("storage-cleanup").click();
+  h.$("storage-cleanup").click();
+  assert.equal(
+    h.state.calls.filter((call) => call.action === "storage-cleanup").length,
+    1,
+  );
+  pending.reject(new Error("预览已过期"));
+  await until(() => h.$("storage-alert").textContent.includes("预览已过期"));
+  assert.equal(h.$("storage-cleanup").disabled, true);
+  assert.equal(h.$("storage-preview").disabled, false);
+  assert.equal(h.$("retention-days").disabled, false);
+});
+
+test("a statistics error after cleanup does not hide the completed deletion result", async (t) => {
+  const h = await harness(t);
+  h.$("tab-storage").click();
+  await until(() => !h.$("storage-save").disabled);
+  h.$("storage-preview").click();
+  await until(() => !h.$("storage-cleanup").disabled);
+  h.state.handlers.storage = () => {
+    throw new Error("statistics offline");
+  };
+  h.$("storage-cleanup").click();
+  await until(() =>
+    h.$("storage-alert").textContent.includes("最新统计读取失败"),
+  );
+  assert.match(
+    h.$("storage-alert").textContent,
+    /已清理 1 个任务的 2 个日志文件/,
+  );
+  assert.equal(h.$("storage-cleanup").disabled, true);
 });
 
 test("a delayed configuration read cannot undo a successful save", async (t) => {
