@@ -18,12 +18,13 @@ import server
 
 
 class NamePolicyTests(unittest.TestCase):
-    def test_simple_task_uses_exact_flash_id_within_latest_gemini_version(self):
+    def test_simple_task_uses_exact_id_from_the_low_end_of_the_live_ladder(self):
         chosen = model_selection.choose_model(
-            ['gemini-4-argon', 'models/gemini-4-flash', 'gemini-3.8-flash', 'gpt-5-mini'],
+            ['gemini-4-argon', 'gemini-4-flash', 'models/gemini-3.8-flash', 'gpt-5-mini'],
             'gemini', 'gemini-4-argon', 'simple')
-        self.assertEqual(chosen['model'], 'models/gemini-4-flash')
+        self.assertEqual(chosen['model'], 'models/gemini-3.8-flash')
         self.assertEqual(chosen['mode'], 'automatic')
+        self.assertEqual((chosen['rank'], chosen['rank_count']), (1, 3))
         self.assertTrue(model_selection.describe_model('3.8flash', 'gemini')['eligible'])
         self.assertEqual(model_selection.describe_model('4argon', 'gemini')['tier'], 'strong')
 
@@ -44,32 +45,67 @@ class NamePolicyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse(model_selection.describe_model(name, 'gemini')['eligible'])
 
-    def test_gemini_version_precedes_tier_without_using_release_dates(self):
-        models = ['gemini-4-pro', 'gemini-3.8-flash', 'gemini-2.5-flash-20991231']
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'simple')['model'], models[0])
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'complex')['model'], models[0])
+    def test_gemini_matches_relative_positions_in_different_live_catalogs(self):
+        catalogs = [
+            ['gemini3.8flash', 'gemini4flash', 'gemini4argon'],
+            ['models/gemini-7-flash', 'gemini-7-pro', 'gemini-8-flash'],
+            ['gemini-3.8-flash', 'gemini-3.10-flash', 'gemini-4-ultra'],
+        ]
+        for models in catalogs:
+            for complexity, expected in zip(('simple', 'standard', 'complex'), models):
+                with self.subTest(models=models, complexity=complexity):
+                    chosen = model_selection.choose_model(list(reversed(models)), 'gemini', 'saved', complexity)
+                    self.assertEqual(chosen['model'], expected)
+        models = ['gemini-4-flash', 'gemini-3.8-pro', 'gemini-2.5-flash-20991231']
+        self.assertEqual(model_selection.choose_model(models, 'gemini', 'saved', 'standard')['model'], models[1])
+        self.assertEqual(model_selection.choose_model(models, 'gemini', 'saved', 'complex')['model'], models[0])
         self.assertEqual(model_selection._version('claude-sonnet-4-6-20261103-1m'), (4, 6, 0))
         self.assertEqual(model_selection._version('gemini-2.5-flash-8b'), (2, 5, 0))
 
-    def test_claude_keeps_stable_before_preview_and_tier_before_version(self):
+    def test_claude_keeps_tier_preferences_and_uses_newest_within_the_tier(self):
         models = ['claude-haiku-5-preview', 'claude-haiku-4-5', 'vendor/claude-haiku-4-5', 'claude-opus-6']
-        self.assertEqual(model_selection.choose_model(models, 'claude', models[2], 'simple')['model'], models[2])
+        self.assertEqual(model_selection.choose_model(models, 'claude', models[2], 'simple')['model'], models[0])
         self.assertEqual(model_selection.choose_model([models[0]], 'claude', 'old', 'simple')['model'], models[0])
+        models += ['claude-haiku-5', 'vendor/claude-haiku-5']
+        self.assertEqual(model_selection.choose_model(models, 'claude', models[-1], 'simple')['model'], models[-1])
+        self.assertEqual(model_selection.choose_model(
+            ['claude-sonnet-5', 'claude-sonnet-4-6', 'claude-haiku-6'], 'claude', 'saved', 'standard')['model'],
+            'claude-sonnet-5')
+        self.assertEqual(model_selection.choose_model(
+            ['claude-fable-5', 'claude-opus-6'], 'claude', 'saved', 'complex')['model'], 'claude-opus-6')
 
-    def test_latest_gemini_preview_precedes_old_stable_but_same_version_prefers_stable(self):
+    def test_gemini_group_ties_prefer_stable_then_saved_model(self):
         models = ['gemini-4-flash-preview', 'gemini-3.8-flash']
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'simple')['model'], models[0])
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[1], 'complex')['model'], models[0])
         models.append('gemini-4-flash')
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'simple')['model'], models[2])
+        self.assertEqual(model_selection.choose_model(models, 'gemini', models[0], 'complex')['model'], models[2])
         models.append('models/gemini-4-flash')
-        self.assertEqual(model_selection.choose_model(models, 'gemini', models[3], 'simple')['model'], models[3])
+        chosen = model_selection.choose_model(models, 'gemini', models[3], 'complex')
+        self.assertEqual(chosen['model'], models[3])
+        self.assertEqual(chosen['rank_count'], 2)
 
-    def test_latest_gemini_version_still_requires_complex_task_tier(self):
-        chosen = model_selection.choose_model(
-            ['gemini-4-flash', 'gemini-3.8-pro'], 'gemini', 'my-saved-default', 'complex')
-        self.assertEqual(chosen['model'], 'my-saved-default')
-        self.assertEqual(chosen['mode'], 'fallback')
-        self.assertIn('最高可识别版本', chosen['reason'])
+    def test_gemini_two_groups_use_lower_middle_and_single_group_is_available_for_all_tasks(self):
+        models = ['gemini-3.8-flash', 'gemini-4-argon']
+        for complexity, expected in [('simple', models[0]), ('standard', models[0]), ('complex', models[1])]:
+            self.assertEqual(model_selection.choose_model(models, 'gemini', 'saved', complexity)['model'], expected)
+        for complexity in model_selection.COMPLEXITIES:
+            chosen = model_selection.choose_model([models[0]], 'gemini', 'saved', complexity)
+            self.assertEqual(chosen['model'], models[0])
+            self.assertEqual(chosen['mode'], 'automatic')
+
+    def test_gemini_aliases_and_previews_do_not_change_the_middle_position(self):
+        models = ['gemini-3.8-flash', 'models/gemini-3.8-flash', 'gemini-3.8-flash-preview',
+                  'gemini-4-flash', 'gemini-4-flash-exp', 'gemini-4-pro', 'gemini-4-argon',
+                  'gemini-5-flash-image', 'claude-opus-9']
+        chosen = model_selection.choose_model(models, 'gemini', 'saved', 'standard')
+        self.assertEqual(chosen['model'], 'gemini-4-flash')
+        self.assertEqual(chosen['rank_count'], 3)
+
+    def test_gemini_matching_positions_are_customizable(self):
+        with patch.dict(model_selection.COMPLEXITY_POSITIONS, {'standard': 1.0}):
+            chosen = model_selection.choose_model(
+                ['gemini-3.8-flash', 'gemini-4-argon'], 'gemini', 'saved', 'standard')
+        self.assertEqual(chosen['model'], 'gemini-4-argon')
 
     def test_gemini_handles_unversioned_aliases_without_inventing_versions(self):
         models = ['gemini-flash-latest', 'gemini-4-pro', 'gemini-5-flash-image']
@@ -96,13 +132,17 @@ class NamePolicyTests(unittest.TestCase):
             policy = model_selection.policy(True, backend)
             self.assertEqual(policy['backend'], backend)
             self.assertEqual(policy['version_first'], backend == 'gemini')
+            self.assertEqual(policy['latest_in_tier'], backend == 'claude')
             self.assertEqual(policy['tier_order'], model_selection.PREFERENCES[backend])
-            self.assertIn('VERSION_FIRST', policy['customization'])
+            self.assertEqual(policy['rank_positions'],
+                             model_selection.COMPLEXITY_POSITIONS if backend == 'gemini' else {})
+            for setting in ('VERSION_FIRST', 'LATEST_IN_TIER', 'TIER_ORDER', 'COMPLEXITY_POSITIONS'):
+                self.assertIn(setting, policy['customization'])
         for model in ('gemini-nano', 'gemini-4-lite'):
             self.assertFalse(model_selection.describe_model(model, 'gemini')['eligible'])
 
-    def test_unknown_catalog_and_complex_task_never_guess_a_downgrade(self):
-        for models in ([], ['private-alias'], ['gemini-3.8-flash', 'gemini-3.8-flash-lite']):
+    def test_empty_and_unknown_catalogs_fall_back(self):
+        for models in ([], ['private-alias']):
             chosen = model_selection.choose_model(models, 'gemini', 'private-default', 'complex')
             self.assertEqual(chosen['model'], 'private-default')
             self.assertEqual(chosen['mode'], 'fallback')
@@ -111,7 +151,7 @@ class NamePolicyTests(unittest.TestCase):
         for model in (' gemini-3-flash', 'gemini-3-flash\n', 'gemini-flash-' + 'x' * 512):
             self.assertFalse(model_selection.describe_model(model, 'gemini')['eligible'])
         models = ['vendor-99/gemini-3.8-flash', 'vendor-1/gemini-4-flash']
-        chosen = model_selection.choose_model(models, 'gemini', models[0], 'simple')
+        chosen = model_selection.choose_model(models, 'gemini', models[0], 'complex')
         self.assertEqual(chosen['model'], models[1])
         self.assertEqual(model_selection.describe_model('lite-relay/gemini-4-pro', 'gemini')['tier'], 'strong')
 
@@ -178,14 +218,27 @@ class AutomaticSelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_automatic_model_is_temporary_visible_and_persisted(self):
         self.enable()
-        with patch.object(common, 'fetch_models', return_value=['gemini-4-argon', 'gemini-4-flash']):
+        with patch.object(common, 'fetch_models', return_value=['gemini-4-argon', 'gemini-3.8-flash']):
             job = await self.submit(task_complexity='simple')
-        self.assertEqual(job['model'], 'gemini-4-flash')
+        self.assertEqual(job['model'], 'gemini-3.8-flash')
         self.assertEqual(self.payloads[-1]['model'], job['model'])
         self.assertEqual(common.load_settings()['model'], 'gemini-4-argon')
         self.assertEqual(progress.load_job(job['job_id'])['model_selection']['mode'], 'automatic')
         self.assertEqual(progress.list_jobs()[0]['model_selection']['complexity'], 'simple')
         self.assertNotIn('routing-fixture', json.dumps(progress.load_job(job['job_id'])))
+
+    async def test_each_task_adapts_to_the_latest_catalog(self):
+        self.enable()
+        with patch.object(common, 'fetch_models', side_effect=[
+            ['gemini-3.8-flash', 'gemini-4-argon'],
+            ['gemini-3.8-flash', 'gemini-4-flash', 'gemini-4-argon'],
+        ]) as fetch:
+            first = await self.submit(task_complexity='standard')
+            second = await self.submit(task_complexity='standard')
+        self.assertEqual(first['model'], 'gemini-3.8-flash')
+        self.assertEqual(second['model'], 'gemini-4-flash')
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(common.load_settings()['model'], 'gemini-4-argon')
 
     async def test_explicit_model_wins_with_either_setting(self):
         for enabled in (False, True):

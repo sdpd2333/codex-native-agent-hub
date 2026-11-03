@@ -921,25 +921,21 @@
                   id="auto-select-model"
                 />自动选择适配模型
                 <small
-                  >默认关闭。开启后允许 Codex
-                  判断任务复杂度，并为本次任务选择其他模型；默认模型保持不变。</small
+                  >默认关闭。开启后由 Codex
+                  按任务复杂度为本次任务选择模型。</small
                 >
               </label>
               <p class="hint">
-                默认策略：Gemini 先比较版本号再匹配 Flash / 高能力档；Claude
-                沿用原规则；DeepSeek 仅自动匹配 Flash。
-                名称判断仅供参考；无法匹配时沿用默认模型。规则可在下方说明的位置自定义。
+                Gemini 按实时列表的版本号与能力生成梯度；Claude
+                按能力档位选择、同档优先较新版本；DeepSeek 仅匹配
+                Flash。无法匹配时沿用默认模型。
               </p>
               <details class="hint">
                 <summary>自定义选型策略</summary>
                 <p>
-                  策略文件位于项目根目录的 <code>model_selection.py</code>。
-                  修改 <code>NAME_RULES</code> 可调整模型名称与档位，
-                  <code>PREFERENCES</code> 可分别调整各代理的任务档位优先顺序，
-                  <code>VERSION_FIRST</code> 可调整哪些代理优先比较版本，
-                  <code>COMPLEXITIES</code> 可调整 Codex 的复杂度判断说明。
-                  保存后重新加载 MCP 服务并重启面板。完整示例见
-                  README「自定义策略」。
+                  编辑项目根目录的 <code>model_selection.py</code>
+                  可调整名称、排序与任务匹配规则，详见 README「自定义策略」。
+                  修改后重新加载 MCP 服务并重启面板。
                 </p>
               </details>
             </div>
