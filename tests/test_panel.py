@@ -406,5 +406,30 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request("api/storage-cleanup"))[0], 404)
 
 
+    async def test_archive_policy_and_legacy_bulk_http_contract(self):
+        status, body, _ = await self.request("api/archive-policy")
+        original = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(original["after_days"], 7)
+        payload = {"enabled": False, "after_days": 14, "revision": original["revision"]}
+        self.assertEqual((await self.request("api/archive-policy", "POST", payload))[0], 200)
+        self.assertEqual((await self.request("api/archive-policy", "POST", payload))[0], 409)
+        self.assertEqual((await self.request("api/archive-policy", "POST", {**payload, "after_days": 0}))[0], 400)
+        job = {"job_id": "cccccccccccccccc", "status": "completed", "title": "Legacy task",
+               "task_description": "full task", "backend": "claude", "finished_at": progress.now()}
+        progress.save_job(job)
+        status, body, _ = await self.request("api/archive-preview", "POST", {})
+        preview = json.loads(body)
+        self.assertEqual((status, preview["job_count"]), (200, 1))
+        self.assertFalse(progress.snapshot(job)["archived"])
+        status, body, _ = await self.request("api/archive-bulk", "POST", {"token": preview["token"]})
+        self.assertEqual((status, json.loads(body)["archived"]), (200, 1))
+        self.assertEqual((await self.request("api/archive-bulk", "POST", {"token": preview["token"]}))[0], 400)
+        self.assertEqual((await self.request("api/archive-preview"))[0], 404)
+        self.assertEqual((await self.request("api/archive-bulk"))[0], 404)
+        self.assertEqual((await self.request("api/archive-preview", "POST", {}, {"Origin": "https://invalid.example"}))[0], 403)
+        self.assertEqual(progress.snapshot(job)["archive_reason"], "legacy")
+
+
 if __name__ == "__main__":
     unittest.main()

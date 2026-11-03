@@ -3,12 +3,162 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+import secrets
+import stat
 import threading
+import time
 import common
 import progress
 
 _metadata: OrderedDict = OrderedDict()
 _metadata_lock = threading.Lock()
+PREVIEW_TTL = 300
+_previews: dict[str, dict] = {}
+_preview_lock = threading.Lock()
+
+
+def validate_policy(enabled, after_days):
+    if not isinstance(enabled, bool):
+        raise common.RelayError("自动归档开关须为布尔值。")
+    if isinstance(after_days, bool) or not isinstance(after_days, int) or not 1 <= after_days <= 3650:
+        raise common.RelayError("自动归档天数须为 1 到 3650 之间的整数。")
+
+
+def policy() -> dict:
+    with common.configuration_lock():
+        try:
+            raw = (common.STATE_DIR / "archive-policy.json").read_bytes()
+            data = json.loads(raw)
+            enabled, days = data["enabled"], data["after_days"]
+            validate_policy(enabled, days)
+        except FileNotFoundError:
+            raw, enabled, days = b"", True, 7
+        except (OSError, ValueError, KeyError, TypeError, common.RelayError):
+            raise common.RelayError("归档规则无法读取，请检查本地 archive-policy.json。") from None
+        return {"enabled": enabled, "after_days": days, "revision": hashlib.sha256(raw).hexdigest()}
+
+
+def save_policy(enabled, after_days, revision) -> dict:
+    validate_policy(enabled, after_days)
+    with common.configuration_lock():
+        if revision != policy()["revision"]:
+            raise common.ConfigurationConflict("归档规则已被其他面板更新，请重新加载规则后再保存。")
+        common._atomic_write(common.STATE_DIR / "archive-policy.json",
+                             json.dumps({"enabled": enabled, "after_days": after_days}).encode())
+        return policy()
+
+
+def safe_job(job_id: str):
+    """Do not read or mutate a job reached through symlinks / Windows junctions."""
+    directory = progress.job_dir(job_id)
+    for path in (common.STATE_DIR, directory.parent, directory, directory / "job.json", directory / "management.json"):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if path.name == "management.json":
+                continue
+            raise
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise OSError("linked job path")
+        if not (stat.S_ISREG(info.st_mode) if path.name.endswith(".json") else stat.S_ISDIR(info.st_mode)):
+            raise OSError("invalid job path")
+        if path.name == "job.json":
+            signature = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return signature
+
+
+def eligible(job: dict, management: dict) -> bool:
+    return (job.get("status") == "completed" and not management.get("archived_at")
+            and not management.get("auto_archive_exempt"))
+
+
+def aged(job: dict, cutoff: datetime) -> bool:
+    try:
+        finished = datetime.fromisoformat(job["finished_at"].replace("Z", "+00:00"))
+        return finished.tzinfo is not None and finished <= cutoff
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def auto_archive() -> int:
+    saved = policy()
+    if not saved["enabled"]:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(days=saved["after_days"])
+    count = 0
+    for candidate in records():
+        job_id = candidate["job_id"]
+        if not aged(candidate, cutoff) or not eligible(candidate, progress.load_management(job_id)):
+            continue
+        try:
+            with common.configuration_lock():
+                # A concurrent restore or policy change wins over this sweep's snapshot.
+                if policy()["revision"] != saved["revision"]:
+                    break
+                safe_job(job_id)
+                job = progress.load_job(job_id)
+                if job and aged(job, cutoff) and eligible(job, progress.load_management(job_id)):
+                    progress.update_management(job_id, archived_at=progress.now(), archive_reason="automatic")
+                    count += 1
+        except OSError:
+            continue
+    return count
+
+
+def preview_legacy() -> dict:
+    entries, summaries = [], []
+    for candidate in records():
+        job_id = candidate["job_id"]
+        if candidate.get("conversation_id") or candidate.get("status") != "completed":
+            continue
+        try:
+            with common.configuration_lock():
+                signature = safe_job(job_id)
+                job = progress.load_job(job_id)
+                if job and not job.get("conversation_id") and eligible(job, progress.load_management(job_id)):
+                    entries.append((job_id, signature))
+                    summaries.append({"job_id": job_id, "title": progress.display_title(job),
+                                      "finished_at": job.get("finished_at")})
+        except OSError:
+            continue
+    token = secrets.token_urlsafe(24)
+    with _preview_lock:
+        for key in list(_previews):
+            if _previews[key]["expires"] <= time.monotonic():
+                del _previews[key]
+        if len(_previews) >= 32:
+            del _previews[next(iter(_previews))]
+        _previews[token] = {"entries": entries, "root": str(common.STATE_DIR),
+                            "expires": time.monotonic() + PREVIEW_TTL}
+    return {"token": token, "expires_in": PREVIEW_TTL, "jobs": summaries, "job_count": len(entries)}
+
+
+def archive_legacy(token) -> dict:
+    if not isinstance(token, str):
+        raise common.RelayError("请先预览未归属的旧任务。")
+    with _preview_lock:
+        plan = _previews.pop(token, None)
+    if not plan or plan["root"] != str(common.STATE_DIR) or plan["expires"] <= time.monotonic():
+        raise common.RelayError("归档预览已过期或已使用，请重新预览。")
+    result = {"archived": 0, "skipped": 0, "errors": 0}
+    for job_id, signature in plan["entries"]:
+        try:
+            with common.configuration_lock():
+                if safe_job(job_id) != signature:
+                    result["skipped"] += 1
+                    continue
+                job = progress.load_job(job_id)
+                if not job or job.get("conversation_id") or not eligible(job, progress.load_management(job_id)):
+                    result["skipped"] += 1
+                    continue
+                progress.update_management(job_id, archived_at=progress.now(), archive_reason="legacy")
+                result["archived"] += 1
+        except OSError:
+            result["errors"] += 1
+    return result
 
 
 def conversation_id(value: str | None) -> str:
@@ -23,10 +173,9 @@ def records():
     for path in (common.STATE_DIR / "jobs").glob("*/job.json"):
         if progress.JOB_ID.fullmatch(path.parent.name):
             try:
-                info = path.stat()
+                signature = safe_job(path.parent.name)
             except OSError:
                 continue
-            signature = (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
             key = str(path)
             with _metadata_lock:
                 cached = _metadata.get(key)
@@ -60,6 +209,11 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
             or offset < 0 or not 1 <= limit <= 100):
         raise common.RelayError("任务分页参数无效。")
     found, running, other_running = [], 0, 0
+    archive_error = ""
+    try:
+        auto_archive()
+    except (common.RelayError, OSError):
+        archive_error = "自动归档暂不可用，请展开归档规则检查配置。"
     needle = search.strip().casefold()
     for job in records():
         actual = progress.effective_status(job)
@@ -70,7 +224,7 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
         archived = bool(progress.load_management(job["job_id"]).get("archived_at"))
         if archived != (view == "archived") or view == "current" and not same:
             continue
-        if status != "all" and not (actual == status or status == "attention" and actual in ("failed", "timed_out", "interrupted")):
+        if status != "all" and not (actual == status or status == "attention" and actual in ("failed", "timed_out", "interrupted", "cancelled")):
             continue
         fields = [job["_display_title"], job["job_id"], job.get("backend"), job.get("model"),
                   job.get("project_dir"), job.get("conversation_id"), (job.get("workspace") or {}).get("path")]
@@ -85,16 +239,25 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
     return {"jobs": [progress.snapshot(job, include_result=False) for job in found[offset:offset + limit]],
             "total": total, "offset": offset, "limit": limit,
             "next_offset": offset + limit if offset + limit < total else None,
-            "running_count": running, "other_running_count": other_running}
+            "running_count": running, "other_running_count": other_running, "archive_error": archive_error}
 
 
 def archive(job_id: str, archived: bool) -> dict:
     if not isinstance(archived, bool):
         raise common.RelayError("archived 必须为布尔值。")
-    job = progress.load_job(job_id)
-    if job is None:
-        raise common.RelayError("任务不存在。")
-    if progress.effective_status(job) == "running":
-        raise common.RelayError("运行中的任务不能归档，请等待结束。")
-    progress.update_management(job_id, archived_at=progress.now() if archived else None)
+    with common.configuration_lock():
+        try:
+            safe_job(job_id)
+        except OSError:
+            raise common.RelayError("任务不存在或其存储路径不可安全访问。") from None
+        job = progress.load_job(job_id)
+        if job is None:
+            raise common.RelayError("任务不存在。")
+        if progress.effective_status(job) == "running":
+            raise common.RelayError("运行中的任务不能归档，请等待结束。")
+        if archived:
+            progress.update_management(job_id, archived_at=progress.now(), archive_reason="manual")
+        else:
+            progress.update_management(job_id, archived_at=None, archive_reason=None,
+                                       auto_archive_exempt=True, restored_at=progress.now())
     return {"job_id": job_id, "archived": archived}

@@ -78,6 +78,7 @@ function fixture() {
     handlers: {},
     clipboard: "",
     updated: "2026-11-03T10:20:30Z",
+    archivePolicy: { enabled: true, after_days: 7, revision: "archive-r1" },
     storage: {
       bytes: { records: 4096, logs: 8192, worktrees: 1024, other: 512 },
       total_bytes: 13824,
@@ -117,7 +118,9 @@ function fixture() {
           (status === "all" ||
             status === job.status ||
             (status === "attention" &&
-              ["failed", "timed_out", "interrupted"].includes(job.status))) &&
+              ["failed", "timed_out", "interrupted", "cancelled"].includes(
+                job.status,
+              ))) &&
           [
             job.title,
             job.job_id,
@@ -154,7 +157,55 @@ function fixture() {
       const job = state.jobs.find((item) => item.job_id === payload.job_id);
       if (job.status === "running") throw new Error("运行中的任务不能归档");
       job.archived = payload.archived;
+      job.archive_reason = payload.archived ? "manual" : null;
+      job.archived_at = payload.archived ? state.updated : null;
+      if (!payload.archived) job.auto_archive_exempt = true;
       return clone(payload);
+    }
+    if (action === "archive-policy") {
+      if (!payload) return clone(state.archivePolicy);
+      if (payload.revision !== state.archivePolicy.revision)
+        throw Object.assign(
+          new Error("归档规则已被其他面板更新，请重新加载规则后再保存。"),
+          { status: 409 },
+        );
+      state.archivePolicy = {
+        ...payload,
+        revision: payload.revision + "-saved",
+      };
+      return clone(state.archivePolicy);
+    }
+    if (action === "archive-preview") {
+      const jobs = state.jobs.filter(
+        (job) =>
+          !job.conversation_id &&
+          job.status === "completed" &&
+          !job.archived &&
+          !job.auto_archive_exempt,
+      );
+      return {
+        token: "archive-preview-fixture",
+        expires_in: 300,
+        jobs: clone(jobs),
+        job_count: jobs.length,
+      };
+    }
+    if (action === "archive-bulk") {
+      let archived = 0;
+      for (const job of state.jobs) {
+        if (
+          !job.conversation_id &&
+          job.status === "completed" &&
+          !job.archived &&
+          !job.auto_archive_exempt
+        ) {
+          job.archived = true;
+          job.archive_reason = "legacy";
+          job.archived_at = state.updated;
+          archived++;
+        }
+      }
+      return { archived, skipped: 0, errors: 0 };
     }
     if (action === "storage") return clone(state.storage);
     if (action === "storage-policy") {

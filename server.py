@@ -64,9 +64,25 @@ async def stop_process(process):
 
 @asynccontextmanager
 async def lifespan(_server):
+    stop_maintenance = asyncio.Event()
+
+    async def maintain_history():
+        while not stop_maintenance.is_set():
+            try:
+                await asyncio.to_thread(history.auto_archive)
+            except (OSError, common.RelayError):
+                pass  # The panel exposes policy errors; do not stop active SDK tasks.
+            try:
+                await asyncio.wait_for(stop_maintenance.wait(), timeout=60)
+            except TimeoutError:
+                pass
+
+    maintenance = asyncio.create_task(maintain_history())
     try:
         yield {}
     finally:
+        stop_maintenance.set()
+        await maintenance  # Let an in-flight sidecar transaction finish before shutdown.
         tasks = [job["future"] for job in JOBS.values() if not job["future"].done()]
         for task in tasks:
             task.cancel()
@@ -166,6 +182,14 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
             status=payload.get("status", "all"), offset=payload.get("offset", 0), limit=payload.get("limit", 50)) | {"updated_at": now()}
     if action == "archive":
         return await asyncio.to_thread(history.archive, payload.get("job_id", ""), payload.get("archived"))
+    if action == "archive-policy":
+        if method == "GET":
+            return await asyncio.to_thread(history.policy)
+        return await asyncio.to_thread(history.save_policy, payload.get("enabled"), payload.get("after_days"), payload.get("revision"))
+    if action == "archive-preview":
+        return await asyncio.to_thread(history.preview_legacy)
+    if action == "archive-bulk":
+        return await asyncio.to_thread(history.archive_legacy, payload.get("token"))
     if action == "storage" and method == "GET":
         return await asyncio.to_thread(storage.overview)
     if action == "storage-policy":

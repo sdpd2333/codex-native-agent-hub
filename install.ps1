@@ -1,5 +1,9 @@
 [CmdletBinding()]
-param([switch]$SkipMcpRegistration)
+param(
+    [switch]$SkipMcpRegistration,
+    [switch]$InstallSkill,
+    [string]$SkillsDir = ''
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -24,6 +28,10 @@ if (-not $SkipMcpRegistration) {
     }
     & codex mcp add native-agent-hub -- $runtimePython (Join-Path $PSScriptRoot 'server.py')
     if ($LASTEXITCODE -ne 0) { throw 'MCP registration failed.' }
+}
+
+if ($InstallSkill) {
+    & (Join-Path $PSScriptRoot 'scripts/install-nah-skill.ps1') -SkillsDir $SkillsDir
 }
 
 Write-Host 'Ready. Ask Codex to open the Native Agent Hub panel on the right, or run configure.cmd.'

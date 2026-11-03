@@ -71,9 +71,10 @@ class PanelServer:
                 if method == "GET" and action == "api/health":
                     self.reply(200, {"ok": True, "application": "native-agent-hub"})
                     return
-                allowed = {"GET": {"api/jobs", "api/config", "api/storage"},
+                allowed = {"GET": {"api/jobs", "api/config", "api/storage", "api/archive-policy"},
                            "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes", "api/job",
-                                    "api/jobs", "api/archive", "api/storage-policy", "api/storage-preview", "api/storage-cleanup"}}
+                                    "api/jobs", "api/archive", "api/archive-policy", "api/archive-preview", "api/archive-bulk",
+                                    "api/storage-policy", "api/storage-preview", "api/storage-cleanup"}}
                 if action not in allowed.get(method, set()):
                     self.reply(404, {"error": "接口不存在。"})
                     return

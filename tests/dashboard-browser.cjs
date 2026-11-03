@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { chromium } = require("playwright-core");
 const axe = require("axe-core");
-const { html, script, fixture } = require("./dashboard-fixture.cjs");
+const { html, script, fixture, job } = require("./dashboard-fixture.cjs");
 
 async function main() {
   const state = fixture(),
@@ -96,6 +96,30 @@ async function main() {
           `Overflow: ${width}px ${tab}`,
         );
         if (tab === "monitor") {
+          const controls = await page.evaluate(() => {
+            const segments = document
+              .querySelector(".view-segments")
+              .getBoundingClientRect();
+            const select = document
+              .querySelector("#job-status")
+              .getBoundingClientRect();
+            const button = document
+              .querySelector("#view-current")
+              .getBoundingClientRect();
+            return {
+              segments: segments.height,
+              select: select.height,
+              topDelta: select.top - segments.top,
+              centerDelta:
+                (segments.top + segments.bottom - button.top - button.bottom) /
+                2,
+            };
+          });
+          assert.equal(controls.segments, 34);
+          assert.equal(controls.select, 34);
+          assert.ok(Math.abs(controls.centerDelta) < 1);
+          if (width >= 480) assert.ok(Math.abs(controls.topDelta) < 1);
+          else assert.ok(controls.topDelta >= 0);
           assert.equal(
             await page.locator("#detail h2").textContent(),
             state.jobs[0].title,
@@ -147,6 +171,40 @@ async function main() {
             path: path.join(output, `${tab}-375.png`),
             fullPage: true,
           });
+        if (tab === "monitor") {
+          await page.locator("#archive-settings > summary").click();
+          const expanded = await page.evaluate(async () => ({
+            client: document.documentElement.clientWidth,
+            scroll: document.documentElement.scrollWidth,
+            violations: (
+              await axe.run(document, {
+                runOnly: {
+                  type: "tag",
+                  values: ["wcag2a", "wcag2aa", "wcag21aa"],
+                },
+              })
+            ).violations.map((item) => ({
+              id: item.id,
+              nodes: item.nodes.map((node) => node.target),
+            })),
+          }));
+          assert.ok(
+            expanded.scroll <= expanded.client + 1,
+            `Expanded archive overflow at ${width}px`,
+          );
+          assert.deepEqual(expanded.violations, []);
+          evidence.push({ width, tab: "archive-rules", ...expanded });
+          if ([375, 1024].includes(width))
+            await page.screenshot({
+              path: path.join(output, `archive-rules-${width}.png`),
+              fullPage: true,
+            });
+          if (width === 1024)
+            await page.screenshot({
+              path: path.join(output, "archive-rules-overview.png"),
+            });
+          await page.locator("#archive-settings > summary").click();
+        }
       }
     }
     await page.setViewportSize({ width: 1024, height: 900 });
@@ -230,6 +288,33 @@ async function main() {
     );
     await page.getByRole("button", { name: "清除筛选", exact: true }).click();
     await page.waitForSelector("#jobs .job");
+    state.jobs.push(job("c", "completed", { conversation_id: "" }));
+    await page.locator("#archive-settings > summary").focus();
+    await page.keyboard.press("Enter");
+    await page.locator("#archive-days").fill("14");
+    await page.locator("#archive-policy-save").click();
+    await page.waitForFunction(() =>
+      document
+        .querySelector("#archive-rule-summary")
+        .textContent.includes("14 天"),
+    );
+    await page.locator("#archive-preview").click();
+    await page.locator("#archive-bulk:not([disabled])").waitFor();
+    assert.equal(state.jobs[2].archived, false);
+    await page.locator("#archive-bulk").click();
+    await page.waitForFunction(() =>
+      document
+        .querySelector("#archive-bulk-alert")
+        .textContent.includes("已归档 1 个"),
+    );
+    await page.locator("#view-archived").click();
+    await page.locator('#jobs [data-job-id="cccccccccccccccc"]').click();
+    await page.getByText(/旧任务批量归档 ·/).waitFor();
+    await page.getByRole("button", { name: "恢复任务", exact: true }).click();
+    await page.locator("#view-all").click();
+    await page.locator('#jobs [data-job-id="cccccccccccccccc"]').click();
+    await page.getByText(/此任务已恢复，免于自动归档/).waitFor();
+    await page.locator("#archive-settings > summary").click();
     await page.setViewportSize({ width: 375, height: 900 });
     state.jobs = [];
     await page.locator("#refresh").click();
@@ -253,7 +338,7 @@ async function main() {
         browser: browser.version(),
         layouts: evidence.length,
         axeViolations: 0,
-        interactions: 10,
+        interactions: 14,
         ok: true,
       }),
     );

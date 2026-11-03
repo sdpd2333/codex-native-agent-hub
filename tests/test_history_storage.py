@@ -26,6 +26,7 @@ class HistoryStorageTests(unittest.TestCase):
         self.state.start()
         progress._trackers.clear()
         history._metadata.clear()
+        history.save_policy(False, 7, history.policy()["revision"])
         storage._previews.clear()
         self.old = datetime.now(timezone.utc) - timedelta(days=60)
 

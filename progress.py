@@ -246,6 +246,8 @@ def _snapshot(job: dict, *, include_result: bool = True) -> dict:
     data.update(title=job.get("_display_title") or display_title(job), status=status, project_name=Path(job.get("project_dir", "")).name,
                 progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")),
                 archived=bool(management.get("archived_at")), archived_at=management.get("archived_at"),
+                archive_reason=management.get("archive_reason"), restored_at=management.get("restored_at"),
+                auto_archive_exempt=bool(management.get("auto_archive_exempt")),
                 logs_cleaned_at=management.get("logs_cleaned_at"))
     text = str(job.get("result", ""))
     data["result_chars"] = job.get("_result_chars", len(text))

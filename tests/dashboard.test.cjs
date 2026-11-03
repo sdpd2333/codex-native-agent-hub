@@ -17,6 +17,160 @@ async function until(predicate) {
   }
   assert.ok(predicate(), "Expected UI state did not arrive");
 }
+
+test("archive rules preserve drafts across polls, validate input and surface revision conflicts", async (t) => {
+  const h = await harness(t);
+  await until(() => !h.$("archive-policy-save").disabled);
+  assert.match(h.$("archive-rule-summary").textContent, /7 天/);
+  h.input("archive-days", "14");
+  await h.refresh();
+  assert.equal(h.$("archive-days").value, "14");
+  h.state.archivePolicy = {
+    enabled: false,
+    after_days: 30,
+    revision: "other-panel",
+  };
+  h.$("archive-policy-save").click();
+  await until(() =>
+    h.$("archive-policy-alert").textContent.includes("重新加载"),
+  );
+  assert.equal(h.$("archive-days").value, "14");
+  h.$("archive-policy-reload").click();
+  await until(() => h.$("archive-days").value === "30");
+  assert.equal(h.$("archive-enabled").checked, false);
+  h.input("archive-days", "0");
+  h.$("archive-policy-save").click();
+  assert.match(h.$("archive-policy-alert").textContent, /1 到 3650/);
+  h.input("archive-days", "14");
+  h.$("archive-enabled").checked = true;
+  h.$("archive-policy-save").click();
+  await until(() => h.$("archive-policy-alert").textContent.includes("已保存"));
+  assert.equal(h.state.archivePolicy.after_days, 14);
+  assert.match(h.$("archive-rule-summary").textContent, /14 天/);
+});
+
+test("archive policy reads serialize with saves and leave operation feedback separate from polling", async (t) => {
+  const h = await harness(t),
+    pending = deferred();
+  await until(() => !h.$("archive-policy-save").disabled);
+  h.state.handlers["archive-policy"] = () => pending.promise;
+  h.$("archive-policy-reload").click();
+  assert.equal(h.$("archive-policy-save").disabled, true);
+  h.$("archive-policy-save").click();
+  pending.reject(new Error("policy unavailable"));
+  await until(() =>
+    h.$("archive-policy-alert").textContent.includes("unavailable"),
+  );
+  const data = await h.state.api("jobs", {});
+  h.state.handlers.jobs = () => ({
+    ...data,
+    archive_error: "自动归档暂不可用",
+  });
+  await h.refresh();
+  assert.match(
+    h.$("archive-maintenance-alert").textContent,
+    /自动归档暂不可用/,
+  );
+  assert.match(h.$("archive-policy-alert").textContent, /policy unavailable/);
+  assert.equal(
+    h.state.calls.filter(
+      (call) => call.action === "archive-policy" && call.payload.revision,
+    ).length,
+    0,
+  );
+});
+
+test("legacy preview is read-only and bulk double clicks consume one token even after failure", async (t) => {
+  const state = fixture();
+  state.jobs.push(job("c", "completed", { conversation_id: "" }));
+  const h = await harness(t, state),
+    pending = deferred();
+  h.$("archive-preview").click();
+  await until(() => !h.$("archive-bulk").disabled);
+  assert.equal(state.jobs[2].archived, false);
+  assert.match(h.$("archive-preview-list").textContent, /Review project c/);
+  state.handlers["archive-bulk"] = () => pending.promise;
+  h.$("archive-bulk").click();
+  h.$("archive-bulk").click();
+  assert.equal(
+    state.calls.filter((call) => call.action === "archive-bulk").length,
+    1,
+  );
+  pending.reject(new Error("response lost"));
+  await until(() =>
+    h.$("archive-bulk-alert").textContent.includes("response lost"),
+  );
+  assert.equal(h.$("archive-bulk").disabled, true);
+  assert.equal(h.$("archive-preview").disabled, false);
+  assert.match(h.$("archive-bulk-alert").textContent, /重新预览/);
+});
+
+test("expired archive previews cannot be confirmed", async (t) => {
+  const state = fixture();
+  state.jobs.push(job("c", "completed", { conversation_id: "" }));
+  const h = await harness(t, state);
+  h.$("archive-preview").click();
+  await until(() => !h.$("archive-bulk").disabled);
+  [...h.timers.values()].find((timer) => timer.ms === 300000).callback();
+  assert.equal(h.$("archive-bulk").disabled, true);
+  assert.match(h.$("archive-preview-note").textContent, /过期/);
+  h.$("archive-bulk").click();
+  assert.equal(
+    state.calls.filter((call) => call.action === "archive-bulk").length,
+    0,
+  );
+});
+
+test("manual archive invalidates pending legacy previews and ignores late responses", async (t) => {
+  const h = await harness(t),
+    pending = deferred();
+  h.state.handlers["archive-preview"] = () => pending.promise;
+  h.$("archive-preview").click();
+  h.findButton("归档任务").click();
+  await until(() => h.$("history-alert").textContent.includes("已归档"));
+  pending.resolve({
+    token: "stale",
+    job_count: 1,
+    expires_in: 300,
+    jobs: [h.state.jobs[0]],
+  });
+  await until(() => !h.$("archive-preview").disabled);
+  assert.equal(h.$("archive-bulk").disabled, true);
+  assert.match(h.$("archive-preview-note").textContent, /状态已变化/);
+  assert.equal(h.$("archive-preview-list").children.length, 0);
+});
+
+test("bulk archive reasons and restored exemptions appear in task details", async (t) => {
+  const state = fixture();
+  state.jobs.push(job("c", "completed", { conversation_id: "" }));
+  const h = await harness(t, state);
+  h.$("archive-preview").click();
+  await until(() => !h.$("archive-bulk").disabled);
+  h.$("archive-bulk").click();
+  await until(() =>
+    h.$("archive-bulk-alert").textContent.includes("已归档 1 个"),
+  );
+  h.$("view-archived").click();
+  await until(() =>
+    h.$("jobs").querySelector('[data-job-id="cccccccccccccccc"]'),
+  );
+  h.select("c");
+  assert.match(
+    h.$("detail").querySelector(".archive-note").textContent,
+    /旧任务批量归档/,
+  );
+  h.findButton("恢复任务").click();
+  await until(() => state.jobs[2].auto_archive_exempt);
+  h.$("view-all").click();
+  await until(() =>
+    h.$("jobs").querySelector('[data-job-id="cccccccccccccccc"]'),
+  );
+  h.select("c");
+  assert.match(
+    h.$("detail").querySelector(".archive-note").textContent,
+    /免于自动归档/,
+  );
+});
 async function harness(t, state = fixture()) {
   const dom = new JSDOM(html, {
     url: "http://127.0.0.1/token/",

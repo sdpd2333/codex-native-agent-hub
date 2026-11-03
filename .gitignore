@@ -16,6 +16,8 @@ panel.json
 **/job.json
 **/management.json
 storage-policy.json
+archive-policy.json
+.nah-skill-install.json
 *.log
 *.bak
 *.pem

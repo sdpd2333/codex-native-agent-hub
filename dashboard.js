@@ -105,6 +105,8 @@
         "storage",
         "storage-preview",
         "storage-cleanup",
+        "archive-preview",
+        "archive-bulk",
       ].includes(action)
         ? 155000
         : 30000,
@@ -823,6 +825,7 @@
     const phase = el("div", "phase"),
       cancel = button("终止任务", () => cancelTask(state), "btn danger small");
     const archive = button("归档任务", () => archiveTask(state)),
+      archiveNote = el("div", "hint archive-note"),
       owner = el("div", "detail-meta"),
       actions = el("div", "detail-actions");
     actions.append(cancel, archive);
@@ -837,6 +840,7 @@
       metrics,
       phase,
       actions,
+      archiveNote,
       operation,
     );
     const description = el("details", "card task-description"),
@@ -938,6 +942,7 @@
       phase,
       cancel,
       archive,
+      archiveNote,
       owner,
       operation,
       error,
@@ -999,6 +1004,8 @@
     renderCurrent(state);
     try {
       await request("archive", { job_id: state.id, archived });
+      if (archivePreview || archiveBusy)
+        clearArchivePreview("任务状态已变化，请重新预览旧任务。");
       alert(
         "history-alert",
         archived
@@ -1353,6 +1360,20 @@
           : "归档任务",
     );
     n.archive.title = job.status === "running" ? "运行中的任务不能归档" : "";
+    const archiveReasons = {
+      manual: "手动归档",
+      automatic: "到期自动归档",
+      legacy: "旧任务批量归档",
+    };
+    text(
+      n.archiveNote,
+      job.archived
+        ? `${archiveReasons[job.archive_reason] || "已归档"} · ${job.archived_at ? new Date(job.archived_at).toLocaleString("zh-CN") : "时间未知"}`
+        : job.auto_archive_exempt
+          ? "此任务已恢复，免于自动归档和旧任务批量归档；仍可手动归档。"
+          : "",
+    );
+    n.archiveNote.hidden = !n.archiveNote.textContent;
     text(n.operation, state.operationError);
     n.operation.hidden = !state.operationError;
     text(n.error, job.error);
@@ -1466,6 +1487,7 @@
           listTotal = data.total ?? jobs.length;
           listOffset = data.offset ?? 0;
           listNext = data.next_offset ?? null;
+          alert("archive-maintenance-alert", data.archive_error || "", "error");
           if (!selected && jobs.length) selected = jobs[0].job_id;
           // Keep the current job's UI state even if it falls outside the bounded history list.
           const retained = new Set(jobs.map((job) => job.job_id));
@@ -1729,6 +1751,162 @@
       storageControls();
     }
   };
+  // Archive policy drafts are independent of job polling and server-side previews.
+  let archivePolicy = null,
+    archivePolicyBusy = false,
+    archiveDraftVersion = 0;
+  let archivePreview = null,
+    archiveBusy = false,
+    archivePreviewVersion = 0,
+    archiveExpiry;
+  function renderArchiveControls() {
+    $("archive-enabled").disabled = !archivePolicy || archivePolicyBusy;
+    $("archive-days").disabled = !archivePolicy || archivePolicyBusy;
+    $("archive-policy-save").disabled = !archivePolicy || archivePolicyBusy;
+    $("archive-policy-reload").disabled = archivePolicyBusy;
+    $("archive-preview").disabled = archiveBusy;
+    $("archive-bulk").disabled = archiveBusy || !archivePreview?.job_count;
+  }
+  function archiveRuleSummary() {
+    text(
+      $("archive-rule-summary"),
+      archivePolicy.enabled
+        ? `成功完成 ${archivePolicy.after_days} 天后自动归档`
+        : "自动归档已关闭",
+    );
+  }
+  async function loadArchivePolicy() {
+    if (archivePolicyBusy) return;
+    archivePolicyBusy = true;
+    const version = archiveDraftVersion;
+    renderArchiveControls();
+    alert("archive-policy-alert", "");
+    try {
+      const data = await request("archive-policy");
+      if (version !== archiveDraftVersion) return;
+      archivePolicy = data;
+      $("archive-enabled").checked = data.enabled;
+      $("archive-days").value = data.after_days;
+      archiveRuleSummary();
+    } catch (error) {
+      text($("archive-rule-summary"), "规则读取失败");
+      alert("archive-policy-alert", error.message, "error");
+    } finally {
+      archivePolicyBusy = false;
+      renderArchiveControls();
+    }
+  }
+  for (const id of ["archive-enabled", "archive-days"])
+    $(id).oninput = () => {
+      archiveDraftVersion++;
+    };
+  $("archive-policy-reload").onclick = loadArchivePolicy;
+  $("archive-policy-save").onclick = async () => {
+    if (archivePolicyBusy || !archivePolicy) return;
+    const days = Number($("archive-days").value);
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      alert(
+        "archive-policy-alert",
+        "自动归档天数须为 1 到 3650 之间的整数。",
+        "error",
+      );
+      return;
+    }
+    archivePolicyBusy = true;
+    renderArchiveControls();
+    try {
+      archivePolicy = await request("archive-policy", {
+        enabled: $("archive-enabled").checked,
+        after_days: days,
+        revision: archivePolicy.revision,
+      });
+      archiveRuleSummary();
+      alert(
+        "archive-policy-alert",
+        "归档规则已保存，适用于本机所有对话。",
+        "success",
+      );
+      if (archivePreview || archiveBusy)
+        clearArchivePreview("归档规则已更新，请重新预览旧任务。");
+      await poll(true);
+    } catch (error) {
+      alert("archive-policy-alert", error.message, "error");
+    } finally {
+      archivePolicyBusy = false;
+      renderArchiveControls();
+    }
+  };
+  function clearArchivePreview(message = "") {
+    archivePreview = null;
+    archivePreviewVersion++;
+    clearTimeout(archiveExpiry);
+    $("archive-preview-list").replaceChildren();
+    $("archive-preview-result").hidden = !message;
+    text($("archive-preview-note"), message);
+    renderArchiveControls();
+  }
+  $("archive-preview").onclick = async () => {
+    if (archiveBusy) return;
+    clearArchivePreview();
+    const version = archivePreviewVersion;
+    archiveBusy = true;
+    renderArchiveControls();
+    alert("archive-bulk-alert", "正在预览…");
+    try {
+      const data = await request("archive-preview", {});
+      if (version !== archivePreviewVersion) return;
+      archivePreview = data;
+      $("archive-preview-result").hidden = false;
+      text(
+        $("archive-preview-note"),
+        data.job_count
+          ? `${data.job_count} 个未归属且成功完成的任务。预览 ${Math.floor(data.expires_in / 60)} 分钟内有效；执行前会再次检查。`
+          : "没有可批量归档的未归属已完成任务。",
+      );
+      $("archive-preview-list").replaceChildren(
+        ...data.jobs.map((job) =>
+          el("li", "", `${job.title || "未命名任务"} · ${job.job_id}`),
+        ),
+      );
+      text($("archive-bulk"), `归档这 ${data.job_count} 个任务`);
+      archiveExpiry = setTimeout(
+        () => clearArchivePreview("预览已过期，请重新预览。"),
+        data.expires_in * 1000,
+      );
+      alert("archive-bulk-alert", "");
+    } catch (error) {
+      if (version === archivePreviewVersion)
+        alert("archive-bulk-alert", error.message, "error");
+    } finally {
+      archiveBusy = false;
+      renderArchiveControls();
+    }
+  };
+  $("archive-bulk").onclick = async () => {
+    if (archiveBusy || !archivePreview?.job_count) return;
+    const token = archivePreview.token;
+    archiveBusy = true;
+    clearArchivePreview(); // A preview is single-use even if its response is lost.
+    alert("archive-bulk-alert", "正在归档…");
+    try {
+      const data = await request("archive-bulk", { token });
+      alert(
+        "archive-bulk-alert",
+        `已归档 ${data.archived} 个任务，跳过 ${data.skipped} 个已变化的任务，${data.errors} 个未成功。可在「已归档」中恢复。`,
+        data.errors ? "error" : "success",
+      );
+      await poll(true);
+    } catch (error) {
+      alert(
+        "archive-bulk-alert",
+        `${error.message} 请检查「已归档」，重新预览后再重试。`,
+        "error",
+      );
+    } finally {
+      archiveBusy = false;
+      renderArchiveControls();
+    }
+  };
   const tabs = ["monitor", "task", "storage", "settings"];
   function tab(id) {
     activeTab = id;
@@ -1794,6 +1972,7 @@
       alert("settings-alert", error.message, "error");
     }
     poll();
+    loadArchivePolicy();
   }
   init();
 })();

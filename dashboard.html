@@ -201,13 +201,83 @@
         gap: 8px;
         margin-bottom: 12px;
       }
-      .view-controls .btn[aria-pressed="true"] {
+      .view-segments {
+        display: inline-flex;
+        flex-shrink: 0;
+        align-items: center;
+        gap: 2px;
+        height: 34px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #f3f5f6;
+      }
+      .view-segments .btn {
+        height: 26px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        font-size: 12px;
+        line-height: 26px;
+        white-space: nowrap;
+      }
+      .view-segments .btn[aria-pressed="true"] {
         color: var(--accent);
-        background: var(--tint);
-        border-color: var(--accent);
+        background: #fff;
+        box-shadow: 0 1px 3px #162c221a;
       }
       .view-controls select {
         width: auto;
+        height: 34px;
+        padding: 0 10px;
+        font-size: 12px;
+        line-height: normal;
+      }
+      .archive-settings {
+        margin-bottom: 16px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #fff;
+      }
+      .archive-settings > summary {
+        padding: 10px 12px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .archive-settings > summary span {
+        color: var(--muted);
+        margin-left: 8px;
+        overflow-wrap: anywhere;
+      }
+      .archive-body {
+        padding: 0 12px 12px;
+      }
+      .archive-fields {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px;
+        margin: 12px 0;
+      }
+      .archive-fields label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+        font-weight: 500;
+      }
+      .archive-fields input[type="checkbox"] {
+        width: auto;
+        accent-color: var(--accent);
+      }
+      .archive-fields input[type="number"] {
+        width: 76px;
+        height: 34px;
+        padding: 5px 8px;
+      }
+      .archive-preview {
+        margin-top: 12px;
       }
       .context-note {
         overflow-wrap: anywhere;
@@ -822,31 +892,33 @@
     </header>
     <main>
       <section id="monitor" role="tabpanel" aria-labelledby="tab-monitor">
-        <div class="view-controls" role="group" aria-label="任务视图">
-          <button
-            class="btn small"
-            id="view-current"
-            type="button"
-            aria-pressed="true"
-          >
-            本对话
-          </button>
-          <button
-            class="btn small"
-            id="view-all"
-            type="button"
-            aria-pressed="false"
-          >
-            全部任务
-          </button>
-          <button
-            class="btn small"
-            id="view-archived"
-            type="button"
-            aria-pressed="false"
-          >
-            已归档
-          </button>
+        <div class="view-controls">
+          <div class="view-segments" role="group" aria-label="任务视图">
+            <button
+              class="btn small"
+              id="view-current"
+              type="button"
+              aria-pressed="true"
+            >
+              本对话
+            </button>
+            <button
+              class="btn small"
+              id="view-all"
+              type="button"
+              aria-pressed="false"
+            >
+              全部任务
+            </button>
+            <button
+              class="btn small"
+              id="view-archived"
+              type="button"
+              aria-pressed="false"
+            >
+              已归档
+            </button>
+          </div>
           <label class="sr-only" for="job-status">任务状态</label>
           <select id="job-status">
             <option value="all">所有状态</option>
@@ -863,6 +935,91 @@
         </div>
         <p class="hint context-note" id="context-note"></p>
         <div id="history-alert" class="alert" role="status" hidden></div>
+        <div
+          id="archive-maintenance-alert"
+          class="alert error"
+          role="status"
+          hidden
+        ></div>
+        <details class="archive-settings" id="archive-settings">
+          <summary>
+            归档规则与旧任务整理
+            <span id="archive-rule-summary">正在读取规则…</span>
+          </summary>
+          <div class="archive-body">
+            <p class="hint">
+              适用于本机所有对话。只自动归档成功完成的任务；运行中、失败、超时、中断和取消的任务保留。恢复后的任务免于自动归档，也不再进入旧任务批量预览。
+            </p>
+            <div class="archive-fields">
+              <label
+                ><input
+                  id="archive-enabled"
+                  type="checkbox"
+                  disabled
+                />启用自动归档</label
+              >
+              <label for="archive-days"
+                >成功完成
+                <input
+                  id="archive-days"
+                  type="number"
+                  min="1"
+                  max="3650"
+                  step="1"
+                  value="7"
+                  disabled
+                />
+                天后</label
+              >
+              <button
+                class="btn"
+                id="archive-policy-save"
+                type="button"
+                disabled
+              >
+                保存规则
+              </button>
+              <button class="btn" id="archive-policy-reload" type="button">
+                重新加载规则
+              </button>
+            </div>
+            <p class="hint">
+              服务启动、运行期间每分钟及读取任务列表时检查到期任务。归档保留结果和工作区，不释放磁盘空间；日志清理请使用「存储管理」。
+            </p>
+            <div
+              id="archive-policy-alert"
+              class="alert"
+              role="status"
+              hidden
+            ></div>
+            <div class="archive-preview">
+              <button class="btn" id="archive-preview" type="button">
+                预览未归属的已完成任务
+              </button>
+              <p class="hint">
+                整理所有项目中没有对话标识的旧任务，不受上方天数限制。先预览，再确认归档。
+              </p>
+              <div id="archive-preview-result" hidden>
+                <p class="hint" id="archive-preview-note" role="status"></p>
+                <ul class="cleanup-list" id="archive-preview-list"></ul>
+                <button
+                  class="btn primary"
+                  id="archive-bulk"
+                  type="button"
+                  disabled
+                >
+                  确认归档
+                </button>
+              </div>
+              <div
+                id="archive-bulk-alert"
+                class="alert"
+                role="status"
+                hidden
+              ></div>
+            </div>
+          </div>
+        </details>
         <div class="toolbar">
           <input
             type="search"
