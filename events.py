@@ -43,9 +43,9 @@ class EventWriter:
             if not done:
                 if identity in self.tools:
                     return
-                self.tools.add(identity)
-                if len(self.tools) > self.limits["max_tool_calls"]:
+                if len(self.tools) >= self.limits["max_tool_calls"]:
                     raise RuntimeError(f'工具调用超过 {self.limits["max_tool_calls"]} 次，已停止此任务。')
+                self.tools.add(identity)
             label = LABELS.get(str(name).lower(), "使用工具")
             if done:
                 label += " · 未成功" if failed else " · 已结束"

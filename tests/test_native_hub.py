@@ -183,6 +183,62 @@ class JobIsolationTests(unittest.IsolatedAsyncioTestCase):
             job = await server.submit_task('review', str(APP), backend='claude')
             self.assertEqual((await server.get_job(job['job_id'], wait_seconds=1))['status'], 'completed')
 
+    async def test_final_save_failure_keeps_result_visible_and_pinned_until_retry(self):
+        process = AsyncMock()
+        process.returncode = 0
+        process.communicate.return_value = (b'{"ok":true,"text":"# OK"}', b'')
+        save = progress.save_job
+        def fail_final(job):
+            if job['status'] != 'running':
+                raise OSError('private filesystem detail')
+            save(job)
+        with patch.object(asyncio, 'create_subprocess_exec', new=AsyncMock(return_value=process)), \
+             patch.object(progress, 'save_job', side_effect=fail_final):
+            created = await server.submit_task('review', str(APP), backend='claude')
+            result = await server.get_job(created['job_id'], wait_seconds=2)
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(result['result'], '# OK')
+            self.assertIn('保存失败', result['persistence_error'])
+            self.assertNotIn('private', str(result))
+            self.assertIsNone(server.JOBS[created['job_id']]['future'].exception())
+            listing = await server.panel_dispatch('POST', 'jobs', {'status': 'completed'})
+            self.assertEqual(listing['jobs'][0]['status'], 'completed')
+            self.assertEqual(listing['jobs'][0]['result_chars'], 4)
+            self.assertEqual(listing['jobs'][0]['persistence_error'], result['persistence_error'])
+            self.assertEqual((await server.panel_dispatch('POST', 'jobs', {'status': 'running'}))['total'], 0)
+            retry = await server.panel_dispatch('POST', 'retry-save', {'job_id': created['job_id']})
+            self.assertIn('保存失败', retry['persistence_error'])
+            with self.assertRaisesRegex(common.RelayError, '先重试保存'):
+                await server.panel_dispatch('POST', 'archive', {'job_id': created['job_id'], 'archived': True})
+            # New submissions must not evict the only recoverable copy of a result.
+            for i in range(49):
+                done = asyncio.get_running_loop().create_future()
+                done.set_result(None)
+                server.JOBS[f'{i:016x}'] = {'status': 'completed', 'future': done}
+            another = await server.submit_task('review', str(APP), backend='claude')
+            await server.get_job(another['job_id'], wait_seconds=2)
+            self.assertIn(created['job_id'], server.JOBS)
+        await server.panel_dispatch('POST', 'retry-save', {'job_id': created['job_id']})
+        self.assertNotIn('persistence_error', server.JOBS[created['job_id']])
+        saved = progress.load_job(created['job_id'])
+        self.assertEqual((saved['status'], saved['result']), ('completed', '# OK'))
+        self.assertIn('finished_at', saved)
+
+    async def test_claude_hook_explicitly_stops_and_rejects_repeated_over_budget_calls(self):
+        root = Path(self.temp.name)
+        writer = EventWriter(root, {'max_model_calls': 10, 'max_tool_calls': 1})
+        failure = {}
+        options = make_options(root, 'review', {'base_url': 'https://relay.example.com', 'model': 'test'},
+                               'fake', root, writer, failure)
+        before = options.hooks['PreToolUse'][0].hooks[0]
+        self.assertEqual(await before({'tool_name': 'Read'}, 'first', {}), {})
+        for identity in ('excess', 'excess', 'third'):
+            reply = await before({'tool_name': 'Read'}, identity, {})
+            self.assertEqual(reply['hookSpecificOutput']['permissionDecision'], 'deny')
+            self.assertFalse(reply['continue_'])
+        self.assertIn('工具调用超过 1 次', failure['error'])
+        self.assertEqual(len(writer.tools), 1)
+
     async def test_claude_denies_write_and_paths_outside_review_workspace(self):
         root = Path(self.temp.name)
         options = make_options(root, 'review', {'base_url': 'https://relay.example.com', 'model': 'test'},

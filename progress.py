@@ -19,7 +19,7 @@ from events import read_activity
 JOB_ID = re.compile(r"[0-9a-f]{16}\Z")
 RESULT_FILE = re.compile(r"result-[0-9a-f]{64}\.txt\Z")
 PUBLIC_FIELDS = ("job_id", "title", "task_description", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "status", "started_at",
-                 "finished_at", "result", "error", "_pid", "_control_url", "_result_file", "_result_chars")
+                 "finished_at", "result", "error", "runtime_settings", "timeout_seconds", "_pid", "_control_url", "_result_file", "_result_chars")
 TOOL_LABELS = {
     "view_file": "读取文件", "list_dir": "浏览目录", "search_dir": "搜索目录",
     "find_file": "查找文件", "find": "查找文件", "grep_search": "搜索代码",
@@ -302,7 +302,7 @@ def _snapshot(job: dict, *, include_result: bool = True, complete_activity: bool
     status = effective_status(job)
     if status != "running":
         activity["phase"] = FINAL_LABELS.get(status, status)
-    data = {key: job[key] for key in ("job_id", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error", "runtime_settings", "timeout_seconds")
+    data = {key: job[key] for key in ("job_id", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error", "runtime_settings", "timeout_seconds", "persistence_error")
             if key in job}
     data.update(title=job.get("_display_title") or display_title(job), status=status, project_name=Path(job.get("project_dir", "")).name,
                 progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")),

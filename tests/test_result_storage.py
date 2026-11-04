@@ -12,6 +12,7 @@ import history
 import progress
 import server
 import storage
+import app_settings
 
 
 class ResultStorageTests(unittest.IsolatedAsyncioTestCase):
@@ -53,6 +54,19 @@ class ResultStorageTests(unittest.IsolatedAsyncioTestCase):
         beyond = await server.get_job(self.job["job_id"], offset=len(full) + 1)
         self.assertEqual(beyond["result"], "")
         self.assertIsNone(beyond["next_offset"])
+
+    async def test_budget_and_timeout_snapshots_survive_reload_and_history(self):
+        limits = app_settings.task_values() | {"max_model_calls": 7, "max_tool_calls": 11}
+        progress.save_job(self.job | {"runtime_settings": limits, "timeout_seconds": 123})
+        loaded = progress.load_job(self.job["job_id"])
+        self.assertEqual(loaded["runtime_settings"], limits)
+        self.assertEqual(loaded["timeout_seconds"], 123)
+        for read in (history.query()["jobs"][0], await server.get_job(self.job["job_id"])):
+            self.assertEqual(read["progress"]["budget_model_calls"], 7)
+            self.assertEqual(read["progress"]["budget_tool_calls"], 11)
+            self.assertEqual(read["timeout_seconds"], 123)
+        progress.save_job(self.job)
+        self.assertEqual(history.query()["jobs"][0]["progress"]["budget_model_calls"], app_settings.DEFAULTS["max_model_calls"])
 
     async def test_legacy_inline_record_over_two_megabytes_remains_readable(self):
         full = "legacy-汉字🙂\n" * 180000

@@ -433,13 +433,54 @@ async function main() {
     assert.equal(await page.locator("#jobs > :first-child").getAttribute("class"), "job-group recent-completed");
     await page.locator("#search").focus();
     await page.screenshot({ path: path.join(output, "recent-completed-375.png"), fullPage: true });
+    // A completion must respect the user's collapsed group and leave focus usable.
+    state.jobs[0].status = "running";
+    state.jobs[0].finished_at = null;
+    await page.locator("#refresh").click();
+    await page.locator('.running-group [data-job-id="bbbbbbbbbbbbbbbb"]').waitFor();
+    await page.locator(".recent-completed > summary").click();
+    await finishing.focus();
+    Object.assign(state.jobs[0], { status: "completed", finished_at: state.updated, result_chars: 4 });
+    state.results[state.jobs[0].job_id] = "# OK";
+    await page.evaluate(() => document.querySelector("#refresh").click());
+    await page.waitForFunction(() => document.activeElement.id === "job-group-recent");
+    assert.equal(await page.locator(".recent-completed").getAttribute("open"), null);
+
+    state.jobs[0].status = "running";
+    state.jobs[0].result_chars = 0;
+    state.jobs[0].finished_at = null;
+    await page.locator("#job-status").selectOption("running");
+    await page.locator('#jobs [data-job-id="bbbbbbbbbbbbbbbb"]').waitFor();
+    Object.assign(state.jobs[0], { status: "completed", finished_at: state.updated, result_chars: 4 });
+    await page.locator("#refresh").click();
+    await page.locator("#detail .result h1").filter({ hasText: /^OK$/ }).waitFor();
+    await page.getByText("所选任务不在当前筛选或本页中，仍会跟踪并显示结果。", { exact: true }).waitFor();
+    assert.equal(await page.locator("#jobs .job").count(), 0);
+    await page.screenshot({ path: path.join(output, "completed-outside-filter-375.png"), fullPage: true });
+
+    await page.locator("#tab-settings").click();
+    await page.locator("#tab-rules").click();
+    await page.locator("#rules-add").click();
+    await page.locator("#rules-add").click();
+    const ruleCount = await page.locator("#rules-list .rule-card").count();
+    const firstDown = page.locator('#rules-list button[id$="-down"]').nth(ruleCount - 2);
+    const focusedRuleName = await page.locator('#rules-list input[id$="-name"]').nth(ruleCount - 2).getAttribute("id");
+    await firstDown.focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await page.evaluate(() => document.activeElement.id), focusedRuleName);
+    await page.locator("#tab-connections").click();
+    await page.locator("#tab-connection-manual").click();
+    await page.locator("#fetch-models").click();
+    await page.locator("#fetch-models:not([disabled])").waitFor();
+    await page.locator("#tab-rules").click();
+    assert.equal(await page.locator('#rules-list button[id$="-up"][data-focus-fallback$="-name"]').first().isDisabled(), true);
     assert.deepEqual(errors, []);
     console.log(
       JSON.stringify({
         browser: browser.version(),
         layouts: evidence.length,
         axeViolations: 0,
-        interactions: 22,
+        interactions: 26,
         ok: true,
       }),
     );

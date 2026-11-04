@@ -228,11 +228,20 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
                                payload.get("candidate_id", ""), payload.get("reason", ""))
     if action == "jobs":
         return await asyncio.to_thread(history.query, conversation=conversation,
+            live_jobs=tuple(job.copy() for job in JOBS.values()),
             view=payload.get("view", "current" if conversation else "all"), search=payload.get("search", ""),
             status=payload.get("status", "all"), offset=payload.get("offset", 0),
             limit=payload.get("limit", app_settings.values()["jobs_page_size"])) | {"updated_at": now()}
     if action == "archive":
+        if JOBS.get(payload.get("job_id", ""), {}).get("persistence_error"):
+            raise common.RelayError("请先重试保存任务结果，再归档。")
         return await asyncio.to_thread(history.archive, payload.get("job_id", ""), payload.get("archived"))
+    if action == "retry-save":
+        job = JOBS.get(payload.get("job_id", ""))
+        if not job or job["status"] == "running":
+            raise common.RelayError("当前服务没有可重试保存的已结束任务。")
+        persist_terminal_job(job)
+        return {"job_id": job["job_id"], "persistence_error": job.get("persistence_error", "")}
     if action == "archive-policy":
         if method == "GET":
             return await asyncio.to_thread(history.policy)
@@ -388,6 +397,17 @@ def worker_environment() -> dict:
     return environment
 
 
+def persist_terminal_job(job: dict) -> None:
+    try:
+        progress.save_job(job)
+    except OSError:
+        # Keep the result and terminal status in memory and pin the job until a
+        # successful retry. Do not expose raw filesystem errors or credentials.
+        job["persistence_error"] = "任务已结束，但保存失败。结果暂留在当前服务内存中，请复制结果或重试保存；关闭服务会丢失未保存的内容。"
+    else:
+        job.pop("persistence_error", None)
+
+
 async def execute(job: dict, task: str, timeout_seconds: int, profile: dict, key: str, workspace_mode: str):
     process = None
     try:
@@ -435,7 +455,7 @@ async def execute(job: dict, task: str, timeout_seconds: int, profile: dict, key
         job.update(status="failed", error=common.redact(str(exc), key))
     finally:
         job["finished_at"] = now()
-        progress.save_job(job)
+        persist_terminal_job(job)
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True))
@@ -541,7 +561,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     require_task_capacity()
     if len(JOBS) >= 50:
         for job_id, old in list(JOBS.items()):
-            if old["status"] != "running":
+            if old["status"] != "running" and not old.get("persistence_error"):
                 del JOBS[job_id]
                 if len(JOBS) < 50:
                     break
@@ -636,7 +656,7 @@ async def cancel_job(job_id: str) -> dict:
         await asyncio.gather(job["future"], return_exceptions=True)
         if job["status"] == "running":
             job.update(status="cancelled", finished_at=now())
-        progress.save_job(job)
+        persist_terminal_job(job)
     return {"job_id": job_id, "status": job["status"]}
 
 

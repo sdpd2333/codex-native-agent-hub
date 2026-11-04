@@ -214,7 +214,7 @@ def activity_time(job: dict) -> float:
 
 
 def query(*, conversation: str = "", view: str = "all", search: str = "", status: str = "all",
-          offset: int = 0, limit: int = 50) -> dict:
+          offset: int = 0, limit: int = 50, live_jobs: tuple[dict, ...] = ()) -> dict:
     conversation = conversation_id(conversation)
     if view not in ("current", "all", "archived") or status not in ("all", "running", "completed", "attention"):
         raise common.RelayError("任务视图或状态筛选无效。")
@@ -231,7 +231,10 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
     except (common.RelayError, OSError):
         archive_error = "自动归档暂不可用，请到设置 → 存储与归档检查配置。"
     needle = search.strip().casefold()
-    for job in records():
+    merged = {job["job_id"]: job for job in records()}
+    for job in live_jobs:
+        merged[job["job_id"]] = job | {"_display_title": progress.display_title(job)}
+    for job in merged.values():
         actual = progress.effective_status(job)
         same = bool(conversation) and job.get("conversation_id") == conversation
         if actual == "running":

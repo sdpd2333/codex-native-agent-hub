@@ -13,6 +13,7 @@ APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
 from events import EventWriter, read_activity
 from progress import TranscriptTracker
+import app_settings
 import runtimes
 from server import worker_environment, stop_process
 
@@ -109,7 +110,10 @@ async def main():
     threading.Thread(target=http.serve_forever, daemon=True).start()
     try:
         for backend in (sys.argv[1:] or ('gemini', 'claude', 'deepseek')):
-            for mode in ('review', 'edit'):
+            scenarios = [('review', None), ('edit', None)]
+            if backend in ('claude', 'deepseek'):
+                scenarios.append(('edit', 1))
+            for mode, tool_budget in scenarios:
                 with tempfile.TemporaryDirectory(prefix='native-hub-smoke-') as tmp:
                     root = Path(tmp).resolve()
                     if os.name == 'nt':
@@ -125,17 +129,29 @@ async def main():
                     case = {'backend': backend, 'mode': mode, 'project': project, 'requests': []}
                     http.case = case
                     profile = {'base_url': f'http://127.0.0.1:{http.server_port}', 'model': backend + '-test', 'effort': ''}
+                    profile['runtime_settings'] = {name: app_settings.DEFAULTS[name] for name in app_settings.TASK_KEYS}
+                    if tool_budget is not None:
+                        profile['runtime_settings']['max_tool_calls'] = tool_budget
                     writer = EventWriter(run_dir)
                     options = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {'start_new_session': True}
                     worker = await asyncio.create_subprocess_exec(sys.executable, str(APP / 'agent_runner.py'),
                         '--backend', backend, '--project', str(project), '--mode', mode, '--run-dir', str(run_dir),
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                        env=safe, **options)
+                        env=safe | {'AGENT_HUB_STATE_DIR': str(root / 'state')}, **options)
                     try:
                         async with asyncio.timeout(90):
                             stdout, stderr = await worker.communicate(json.dumps({'task': 'Read sentinel.txt and report findings.' if mode == 'review'
                                 else 'Create written.txt with the supplied test content.', 'profile': profile, 'key': 'fake-local-key'}).encode())
                         response = json.loads(stdout.decode('utf-8'))
+                        if tool_budget is not None:
+                            assert not response.get('ok') and '工具调用超过 1 次' in response.get('error', ''), (backend, response)
+                            assert (project / 'written.txt').read_text(encoding='utf-8').strip() == WRITTEN
+                            assert not (project / 'shell.txt').exists(), (backend, 'Over-budget command executed')
+                            assert len(case['requests']) == 2, (backend, 'Continued after exhausted budget', len(case['requests']))
+                            assert read_activity(writer.path)['tool_calls'] == 1
+                            print(json.dumps({'backend': backend, 'mode': mode, 'tool_budget': tool_budget,
+                                              'ok': True, 'excess_tool_blocked': True}), flush=True)
+                            continue
                         assert worker.returncode == 0 and response.get('ok'), (backend, mode, response, stderr.decode('utf-8', 'replace')[-2000:])
                         result = response.get('text')
                     finally:

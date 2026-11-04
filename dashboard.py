@@ -106,7 +106,7 @@ class PanelServer:
                     return
                 allowed = {"GET": {"api/jobs", "api/config", "api/storage", "api/archive-policy", "api/routing", "api/app-settings"},
                            "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes", "api/job",
-                                    "api/jobs", "api/archive", "api/archive-policy", "api/archive-preview", "api/archive-bulk",
+                                    "api/jobs", "api/archive", "api/retry-save", "api/archive-policy", "api/archive-preview", "api/archive-bulk",
                                     "api/storage-policy", "api/storage-preview", "api/storage-cleanup",
                                     "api/local-detect", "api/local-sync", "api/routing", "api/routing-catalog",
                                     "api/routing-context", "api/routing-preview", "api/panel", "api/app-settings"}}

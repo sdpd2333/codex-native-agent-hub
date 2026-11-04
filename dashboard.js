@@ -34,7 +34,12 @@
   let config = { profiles: {}, runtimes: {} },
     backend = "gemini",
     jobs = [],
-    selected = null;
+    selected = null,
+    selectedJob = null,
+    selectionVersion = 0,
+    detailLoading = false,
+    detailError = "",
+    selectionMustMatch = false;
   let busy = false,
     paused = false,
     timer,
@@ -59,6 +64,10 @@
     listTotal = 0,
     listNext = null,
     listLoading = false,
+    listError = "",
+    searchTimer,
+    searchComposing = false,
+    searchQuery = "",
     recentCompletedIds = new Set();
   let applicationSettings = null,
     applicationBusy = false,
@@ -348,7 +357,7 @@
   function settingsBusy(value) {
     busy = value;
     for (const node of document.querySelectorAll(
-      "#settings input,#settings select,#settings button",
+      "#connections input,#connections select,#connections button",
     ))
       node.disabled = value;
   }
@@ -716,10 +725,11 @@
               : $("task-complexity").value
             : null,
       });
-      selected = data.job_id;
+      selectJob(data);
       routeState = null;
       view = config.panel_context?.conversation_id ? "current" : "all";
       $("search").value = "";
+      searchQuery = "";
       $("job-status").value = "all";
       listOffset = 0;
       listVersion++;
@@ -750,8 +760,37 @@
     node.className = "badge " + status;
     text(node, statuses[status] || status);
   }
+  function selectJob(job) {
+    selected = job?.job_id || null;
+    selectedJob = job || null;
+    selectionVersion++;
+    detailLoading = false;
+    detailError = "";
+  }
+  async function refreshSelected(version) {
+    const id = selected, selection = selectionVersion;
+    if (!id || jobs.some((job) => job.job_id === id)) return;
+    detailLoading = true;
+    detailError = "";
+    renderDetail();
+    try {
+      const job = await request("job", { job_id: id, max_chars: 100, include_description: false });
+      if (version !== listVersion || selection !== selectionVersion) return;
+      if (job.job_id !== id) throw new Error("任务详情响应无效，请重试。");
+      selectedJob = job;
+    } catch (error) {
+      if (version !== listVersion || selection !== selectionVersion) return;
+      selectedJob = null;
+      detailError = error.message;
+    } finally {
+      if (version === listVersion && selection === selectionVersion) {
+        detailLoading = false;
+        renderDetail();
+      }
+    }
+  }
   function renderList() {
-    const query = $("search").value.trim(),
+    const query = searchQuery.trim(),
       list = jobs;
     for (const name of ["current", "all", "archived"])
       $("view-" + name).setAttribute("aria-pressed", String(name === view));
@@ -771,10 +810,20 @@
       $("page-info"),
       listLoading
         ? "正在加载…"
-        : listTotal
+        : listError
+          ? "加载失败"
+          : listTotal && list.length
           ? `${listOffset + 1}–${listOffset + list.length} / ${listTotal}`
           : "0 个任务",
     );
+    if (listError) {
+      const error = el("div", "alert error");
+      error.setAttribute("role", "status");
+      error.append(el("strong", "", "任务列表加载失败"), el("p", "", listError),
+        button("重试加载任务", () => poll(true)));
+      $("jobs").replaceChildren(error);
+      return;
+    }
     if (!list.length) {
       const empty = el("div", "empty");
       empty.append(
@@ -814,7 +863,7 @@
         const node = button(
           "",
           () => {
-            selected = job.job_id;
+            selectJob(jobs.find((item) => item.job_id === job.job_id));
             render();
           },
           "job",
@@ -874,8 +923,10 @@
       reconcile($("jobs"), groups);
     }
     // Status changes can move the same card between groups; retain keyboard focus.
-    if (focused?.isConnected && document.activeElement !== focused)
-      focused.focus({ preventScroll: true });
+    if (focused?.isConnected && document.activeElement !== focused) {
+      const collapsed = focused.closest("details:not([open])");
+      (collapsed?.querySelector("summary") || focused).focus({ preventScroll: true });
+    }
   }
   function metric(label) {
     const node = el("div", "metric"),
@@ -888,6 +939,7 @@
       id,
       cancelPending: false,
       archivePending: false,
+      savePending: false,
       operationError: "",
       changes: null,
       changesPending: false,
@@ -921,13 +973,19 @@
       archiveNote = el("div", "hint archive-note"),
       owner = el("div", "detail-meta"),
       actions = el("div", "detail-actions");
-    actions.append(cancel, archive);
+    const retrySave = button("重试保存结果", () => retrySaveTask(state)),
+      persistence = el("div", "alert error"),
+      outside = el("p", "hint");
+    persistence.setAttribute("role", "status");
+    outside.textContent = "所选任务不在当前筛选或本页中，仍会跟踪并显示结果。";
+    actions.append(cancel, archive, retrySave);
     const operation = el("div", "alert error");
     operation.setAttribute("role", "status");
     top.append(
       head,
       meta,
       owner,
+      outside,
       el("div", "detail-meta", id),
       selection,
       metrics,
@@ -935,6 +993,7 @@
       actions,
       archiveNote,
       operation,
+      persistence,
     );
     const description = el("details", "card task-description"),
       descriptionText = el("pre", "description-text"),
@@ -1042,6 +1101,9 @@
       phase,
       cancel,
       archive,
+      retrySave,
+      persistence,
+      outside,
       archiveNote,
       owner,
       operation,
@@ -1098,7 +1160,7 @@
     }
   }
   async function archiveTask(state) {
-    if (state.archivePending || state.job.status === "running") return;
+    if (state.archivePending || state.job.status === "running" || state.job.persistence_error) return;
     state.archivePending = true;
     state.operationError = "";
     const archived = !state.job.archived;
@@ -1119,6 +1181,21 @@
       state.operationError = error.message;
     } finally {
       state.archivePending = false;
+      renderCurrent(state);
+    }
+  }
+  async function retrySaveTask(state) {
+    if (state.savePending) return;
+    state.savePending = true;
+    state.operationError = "";
+    renderCurrent(state);
+    try {
+      await request("retry-save", { job_id: state.id });
+      await poll(true);
+    } catch (error) {
+      state.operationError = error.message;
+    } finally {
+      state.savePending = false;
       renderCurrent(state);
     }
   }
@@ -1394,20 +1471,21 @@
     );
   }
   function renderDetail() {
-    const job = jobs.find((item) => item.job_id === selected);
+    const listed = jobs.find((item) => item.job_id === selected),
+      job = listed || (selectedJob?.job_id === selected ? selectedJob : null);
     if (!job) {
       const empty = el("div", "empty");
       empty.append(
         el(
           "strong",
           "",
-          selected ? "所选任务不在当前列表中" : "在这里查看代理的任务进展",
+          selected ? detailLoading ? "正在读取所选任务…" : "所选任务不在当前列表中" : "在这里查看代理的任务进展",
         ),
         el(
           "p",
           "",
           selected
-            ? "任务可能已归档或不在本页，可切换视图、翻页或搜索。"
+            ? detailError || "正在查询任务详情，请稍候。"
             : "选择任务以查看阶段、工具活动和执行结果。",
         ),
       );
@@ -1420,6 +1498,12 @@
     const state = states.get(job.job_id) || makeState(job.job_id),
       n = state.nodes;
     state.job = job;
+    selectedJob = job;
+    n.outside.hidden = Boolean(listed);
+    text(n.persistence, job.persistence_error || "");
+    n.persistence.hidden = n.retrySave.hidden = !job.persistence_error;
+    n.retrySave.disabled = state.savePending;
+    text(n.retrySave, state.savePending ? "正在保存…" : "重试保存结果");
     if (mountedState !== state) {
       rememberDetailScroll();
       $("detail").replaceChildren(n.root);
@@ -1472,7 +1556,7 @@
     n.cancel.hidden = job.status !== "running" || !job.can_cancel;
     n.cancel.disabled = state.cancelPending;
     text(n.cancel, state.cancelPending ? "正在终止…" : "终止任务");
-    n.archive.disabled = state.archivePending || job.status === "running";
+    n.archive.disabled = state.archivePending || job.status === "running" || Boolean(job.persistence_error);
     text(
       n.archive,
       state.archivePending
@@ -1481,7 +1565,7 @@
           ? "恢复任务"
           : "归档任务",
     );
-    n.archive.title = job.status === "running" ? "运行中的任务不能归档" : "";
+    n.archive.title = job.persistence_error ? "请先重试保存任务结果" : job.status === "running" ? "运行中的任务不能归档" : "";
     const archiveReasons = {
       manual: "手动归档",
       automatic: "到期自动归档",
@@ -1539,17 +1623,35 @@
     renderList();
     renderDetail();
   }
-  function changeList() {
+  function changeList({ preserveSelection = false } = {}) {
+    clearTimeout(searchTimer);
+    searchQuery = $("search").value;
     listVersion++;
     listOffset = 0;
-    selected = null;
+    if (!preserveSelection) selectJob(null);
+    selectionMustMatch = preserveSelection;
     jobs = [];
     listLoading = true;
+    listError = "";
     alert("history-alert", "");
     render();
     poll(true);
   }
-  $("search").oninput = changeList;
+  function scheduleSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => changeList({ preserveSelection: true }), 250);
+  }
+  $("search").oncompositionstart = () => {
+    searchComposing = true;
+    clearTimeout(searchTimer);
+  };
+  $("search").oncompositionend = () => {
+    searchComposing = false;
+    scheduleSearch();
+  };
+  $("search").oninput = (event) => {
+    if (!searchComposing && !event.isComposing) scheduleSearch();
+  };
   $("job-status").onchange = changeList;
   for (const name of ["current", "all", "archived"])
     $("view-" + name).onclick = () => {
@@ -1565,9 +1667,10 @@
   function page(offset) {
     listOffset = offset;
     listVersion++;
-    selected = null;
+    selectJob(null);
     jobs = [];
     listLoading = true;
+    listError = "";
     render();
     poll(true);
   }
@@ -1598,20 +1701,23 @@
         try {
           const data = await request("jobs", {
             view,
-            search: $("search").value,
+            search: searchQuery,
             status: $("job-status").value,
             offset: listOffset,
             limit: preference("jobs_page_size", 50),
           });
           if (version !== listVersion) continue;
           listLoading = false;
+          listError = "";
           jobs = Array.isArray(data.jobs) ? data.jobs : [];
           recentCompletedIds = new Set(data.recent_completed_ids || []);
           listTotal = data.total ?? jobs.length;
           listOffset = data.offset ?? 0;
           listNext = data.next_offset ?? null;
           alert("archive-maintenance-alert", data.archive_error || "", "error");
-          if (!selected && jobs.length) selected = jobs[0].job_id;
+          if (selectionMustMatch && !jobs.some((job) => job.job_id === selected)) selectJob(null);
+          selectionMustMatch = false;
+          if (!selected && jobs.length) selectJob(jobs[0]);
           // Keep the current job's UI state even if it falls outside the bounded history list.
           const retained = new Set(jobs.map((job) => job.job_id));
           for (const id of cards.keys())
@@ -1623,6 +1729,7 @@
               id !== selected &&
               !state.cancelPending &&
               !state.archivePending &&
+              !state.savePending &&
               !state.changesPending &&
               !state.copying &&
               !state.description.pending &&
@@ -1631,6 +1738,8 @@
               states.delete(id);
           }
           render();
+          await refreshSelected(version);
+          if (version !== listVersion) continue;
           text(
             $("running-count"),
             data.running_count ??
@@ -1647,6 +1756,7 @@
         } catch (error) {
           if (version !== listVersion) continue;
           listLoading = false;
+          listError = error.message;
           renderList();
           failures++;
           sync(
@@ -2215,24 +2325,27 @@
       }),
     );
   }
-  function poolOrder(parent, values, update) {
+  function poolOrder(parent, values, update, prefix, fallback) {
     const row = el("div", "row");
     values.forEach((id, i) => {
       const c = ruleCatalog.find((item) => item.id === id);
       const up = button(`${i + 1}. ${c?.model || id} ↑`, () => {
+        if (rulesBusy || i <= 0 || i >= values.length) return;
         const next = [...values];
         [next[i - 1], next[i]] = [next[i], next[i - 1]];
         update(next);
       });
       up.disabled = i === 0;
+      up.id = `${prefix}-${id}-up`;
+      up.dataset.focusFallback = fallback;
       up.setAttribute("aria-label", `提高 ${c?.model || id} 的候选优先级`);
       row.append(up);
     });
     parent.append(row);
   }
-  function renderRules() {
+  function renderRules(preferredFocusId) {
     if (!ruleDraft) return;
-    const focusedId = document.activeElement?.id;
+    const focusedId = preferredFocusId || document.activeElement?.id;
     $("rules-enabled").checked = ruleDraft.enabled;
     $("rules-list").replaceChildren(
       ...ruleDraft.rules.map((rule, index) => {
@@ -2266,6 +2379,7 @@
           const wrap = el("label", "choice", label),
             input = el("input");
           input.type = "checkbox";
+          input.id = `rule-${rule.id}-${key}`;
           input.checked = rule[key];
           input.onchange = () => {
             rule[key] = input.checked;
@@ -2310,6 +2424,7 @@
             const lab = el("label", "choice", name),
               input = el("input");
             input.type = "checkbox";
+            input.id = `rule-${rule.id}-${key}-${value}`;
             input.checked = (rule.conditions[key] || []).includes(value);
             input.onchange = () => {
               const list = new Set(rule.conditions[key] || []);
@@ -2344,7 +2459,7 @@
           rule.candidates = values;
           changedRules();
           renderRules();
-        });
+        }, `rule-${rule.id}-candidate`, pool.id);
         field(
           "effort",
           "推理强度（排除不支持的代理）",
@@ -2362,6 +2477,7 @@
         ]) {
           const move = button(label, () => {
             const i = index + step;
+            if (rulesBusy || i < 0 || i >= ruleDraft.rules.length) return;
             [ruleDraft.rules[index], ruleDraft.rules[i]] = [
               ruleDraft.rules[i],
               rule,
@@ -2371,15 +2487,19 @@
           });
           move.disabled =
             index + step < 0 || index + step >= ruleDraft.rules.length;
+          move.id = `rule-${rule.id}-${step < 0 ? "up" : "down"}`;
+          move.dataset.focusFallback = `rule-${rule.id}-name`;
           actions.append(move);
         }
-        actions.append(
-          button("删除规则", () => {
-            ruleDraft.rules.splice(index, 1);
-            changedRules();
-            renderRules();
-          }),
-        );
+        const remove = button("删除规则", () => {
+          if (rulesBusy) return;
+          ruleDraft.rules.splice(index, 1);
+          changedRules();
+          const neighbor = ruleDraft.rules[Math.min(index, ruleDraft.rules.length - 1)];
+          renderRules(neighbor ? `rule-${neighbor.id}-name` : "rules-add");
+        });
+        remove.id = `rule-${rule.id}-delete`;
+        actions.append(remove);
         card.append(actions);
         return card;
       }),
@@ -2392,10 +2512,11 @@
       ruleDraft.fallback = values;
       changedRules();
       renderRules();
-    });
+    }, "fallback-candidate", "rules-fallback");
     $("rules-fallback").after(order);
-    if (focusedId && $(focusedId) && document.activeElement !== $(focusedId))
-      $(focusedId).focus({ preventScroll: true });
+    const target = focusedId && $(focusedId);
+    if (target && document.activeElement !== target)
+      (target.disabled ? $(target.dataset.focusFallback) : target)?.focus({ preventScroll: true });
   }
   $("rules-enabled").onchange = () => {
     ruleDraft.enabled = $("rules-enabled").checked;
@@ -2857,7 +2978,8 @@
   setInterval(() => {
     if (document.hidden || activeTab !== "monitor") return;
     for (const node of document.querySelectorAll("[data-duration]")) {
-      const job = jobs.find((item) => item.job_id === node.dataset.duration);
+      const job = jobs.find((item) => item.job_id === node.dataset.duration)
+        || (selectedJob?.job_id === node.dataset.duration ? selectedJob : null);
       if (job) text(node, duration(job));
     }
   }, 1000);

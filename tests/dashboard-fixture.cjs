@@ -425,6 +425,7 @@ function fixture() {
       };
     if (action === "job") {
       const summary = state.jobs.find((item) => item.job_id === payload.job_id);
+      if (!summary) throw new Error("任务不存在。");
       const chars = Array.from(state.results[payload.job_id] || ""),
         offset = payload.offset || 0,
         max = payload.max_chars || 20000;
@@ -448,6 +449,11 @@ function fixture() {
       const created = job("c");
       state.jobs.unshift(created);
       return clone(created);
+    }
+    if (action === "retry-save") {
+      const target = state.jobs.find((item) => item.job_id === payload.job_id);
+      delete target.persistence_error;
+      return { job_id: target.job_id, persistence_error: "" };
     }
     if (action === "cancel") {
       const target = state.jobs.find((item) => item.job_id === payload.job_id);

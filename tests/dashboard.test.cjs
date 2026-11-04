@@ -229,6 +229,69 @@ test("rule drafts support order, exact candidate pools and stale-save conflicts"
   assert.equal(h.$(edit.id).value, "保留草稿");
 });
 
+test("connection operations preserve other pages' disabled controls and boundary moves are guarded", async (t) => {
+  const h = await harness(t);
+  h.$("tab-rules").click();
+  h.$("rules-catalog").click();
+  await until(() => h.$("rules-catalog-status").textContent.includes("2"));
+  h.$("rules-add").click();
+  let card = h.$("rules-list").firstChild;
+  const pool = card.querySelector('select[id$="-candidates"]');
+  for (const option of pool.options) option.selected = true;
+  change(h, pool.id);
+  const upId = h.$("rules-list").querySelector('button[id$="-up"][data-focus-fallback$="-name"]').id;
+  h.$("tab-connections").click();
+  h.$("fetch-models").click();
+  await until(() => !h.$("fetch-models").disabled);
+  assert.equal(h.$(upId).disabled, true);
+  assert.equal(h.$("runtime-save").disabled, true);
+  h.$("tab-rules").click();
+  const firstCandidate = h.$("rules-list").querySelector('button[aria-label^="提高"]');
+  assert.equal(firstCandidate.disabled, true);
+  // Defend the data even if an extension or another UI bug enables a boundary button.
+  h.$(upId).disabled = false;
+  h.$(upId).click();
+  firstCandidate.disabled = false;
+  firstCandidate.click();
+  h.$("rules-save").click();
+  await until(() => h.$("rules-alert").textContent.startsWith("规则已保存"));
+  assert.equal(h.state.config.routing_policy.rules.length, 1);
+  assert.equal(h.state.config.routing_policy.rules[0].candidates.length, 2);
+  assert.ok(h.state.config.routing_policy.rules[0].candidates.every(Boolean));
+});
+
+test("rule and candidate reorder retain usable keyboard focus, including deletion", async (t) => {
+  const h = await harness(t);
+  h.$("tab-rules").click();
+  h.$("rules-catalog").click();
+  await until(() => h.$("rules-catalog-status").textContent.includes("2"));
+  h.$("rules-add").click();
+  h.$("rules-add").click();
+  h.$("rules-add").click();
+  const first = h.$("rules-list").firstChild;
+  const down = first.querySelector('button[id$="-down"]');
+  const nameId = first.querySelector('input[id$="-name"]').id;
+  down.focus();
+  down.click();
+  assert.equal(h.window.document.activeElement.id, down.id);
+  h.$(down.id).click();
+  assert.equal(h.window.document.activeElement.id, nameId); // Boundary button is now disabled.
+  const pool = h.$(nameId).closest(".rule-card").querySelector('select[id$="-candidates"]');
+  for (const option of pool.options) option.selected = true;
+  change(h, pool.id);
+  const candidate = h.$(nameId).closest(".rule-card").querySelectorAll('button[aria-label^="提高"]')[1];
+  candidate.focus();
+  candidate.click();
+  assert.equal(h.window.document.activeElement.id, pool.id);
+  while (h.$("rules-list").children.length) {
+    const remove = h.$("rules-list").lastChild.querySelector('button[id$="-delete"]');
+    remove.focus();
+    remove.click();
+    assert.notEqual(h.window.document.activeElement.tagName, "BODY");
+  }
+  assert.equal(h.window.document.activeElement.id, "rules-add");
+});
+
 test("manual rule classification previews without execution and binds the submitted decision", async (t) => {
   const state = fixture();
   state.config.routing_policy.enabled = true;
@@ -531,6 +594,12 @@ async function harness(t, state = fixture()) {
     $(id).value = value;
     $(id).dispatchEvent(new window.Event("input", { bubbles: true }));
   };
+  const flushSearch = () => {
+    for (const [id, timer] of timers) if (timer.ms === 250) {
+      timers.delete(id);
+      timer.callback();
+    }
+  };
   const select = (id) =>
     $("jobs")
       .querySelector(`[data-job-id="${id.repeat(16)}"]`)
@@ -545,6 +614,7 @@ async function harness(t, state = fixture()) {
     $,
     refresh,
     input,
+    flushSearch,
     select,
     findButton,
     timers,
@@ -623,6 +693,89 @@ test("removed selections clear old details and action buttons", async (t) => {
   await h.refresh();
   assert.match(h.$("detail").textContent, /所选任务不在当前列表/);
   assert.equal(h.$("detail").querySelector("button"), null);
+});
+
+test("a selected running task keeps its completed Markdown result outside the filter", async (t) => {
+  const h = await harness(t);
+  change(h, "job-status", "running");
+  await until(() => h.$("detail").textContent.includes("Review project b"));
+  const completed = h.state.jobs[1];
+  Object.assign(completed, { status: "completed", can_cancel: false, result_chars: 4, finished_at: h.state.updated });
+  h.state.results[completed.job_id] = "# OK";
+  await h.refresh();
+  await until(() => h.$("detail").querySelector(".result h1")?.textContent === "OK");
+  assert.equal(h.$("jobs").querySelectorAll(".job").length, 0);
+  assert.match(h.$("detail").textContent, /不在当前筛选或本页/);
+  assert.equal(h.findButton("终止任务").hidden, true);
+  h.findButton("复制完整结果").click();
+  await until(() => h.state.clipboard === "# OK");
+});
+
+test("late out-of-filter detail responses never replace a newer task selection", async (t) => {
+  const h = await harness(t), pending = deferred();
+  h.select("b");
+  h.state.handlers.jobs = () => ({ jobs: [clone(h.state.jobs[0])], updated_at: h.state.updated });
+  h.state.handlers.job = () => pending.promise;
+  await h.refresh();
+  h.select("a");
+  pending.resolve(clone(h.state.jobs[1]));
+  for (let i = 0; i < 6; i++) await tick();
+  assert.match(h.$("detail").querySelector("h2").textContent, /project a/);
+});
+
+test("failed terminal persistence exposes result copy and a retry without changing completion", async (t) => {
+  const state = fixture();
+  state.jobs[0].persistence_error = "任务已结束，但保存失败。结果暂留在当前服务内存中。";
+  state.results[state.jobs[0].job_id] = "# OK";
+  state.jobs[0].result_chars = 4;
+  const h = await harness(t, state);
+  assert.equal(h.findButton("归档任务").disabled, true);
+  assert.equal(h.findButton("重试保存结果").hidden, false);
+  h.findButton("复制完整结果").click();
+  await until(() => state.clipboard === "# OK");
+  h.findButton("重试保存结果").click();
+  await until(() => h.findButton("重试保存结果")?.hidden);
+  assert.equal(h.findButton("归档任务").disabled, false);
+  assert.equal(state.jobs[0].status, "completed");
+});
+
+test("search waits for IME commit, debounces input and preserves a matching selection", async (t) => {
+  const h = await harness(t);
+  h.select("b");
+  const search = h.$("search");
+  const beforeComposition = h.state.calls.filter((call) => call.action === "jobs").length;
+  search.dispatchEvent(new h.window.CompositionEvent("compositionstart"));
+  search.value = "pin";
+  search.dispatchEvent(new h.window.InputEvent("input", { isComposing: true, bubbles: true }));
+  h.flushSearch();
+  assert.equal(h.state.calls.filter((call) => call.action === "jobs").length, beforeComposition);
+  assert.match(h.$("detail").querySelector("h2").textContent, /project b/);
+  await h.refresh();
+  assert.equal(h.state.calls.filter((call) => call.action === "jobs").at(-1).payload.search, "");
+  search.value = "project-b";
+  search.dispatchEvent(new h.window.CompositionEvent("compositionend"));
+  search.dispatchEvent(new h.window.InputEvent("input", { bubbles: true }));
+  const count = h.state.calls.filter((call) => call.action === "jobs").length;
+  assert.equal([...h.timers.values()].filter((timer) => timer.ms === 250).length, 1);
+  h.flushSearch();
+  await until(() => h.$("jobs").querySelectorAll(".job").length === 1);
+  assert.equal(h.state.calls.filter((call) => call.action === "jobs").length, count + 1);
+  assert.match(h.$("detail").querySelector("h2").textContent, /project b/);
+});
+
+test("failed list pagination displays a retry instead of empty history or reversed ranges", async (t) => {
+  const state = fixture();
+  for (let i = 3; i <= 62; i++) state.jobs.push(job("c", "completed", { job_id: i.toString(16).padStart(16, "0") }));
+  const h = await harness(t, state);
+  state.handlers.jobs = () => { throw new Error("fixture network failure"); };
+  h.$("page-next").click();
+  await until(() => h.$("jobs").textContent.includes("任务列表加载失败"));
+  assert.match(h.$("jobs").textContent, /fixture network failure/);
+  assert.equal(h.$("page-info").textContent, "加载失败");
+  assert.doesNotMatch(h.$("jobs").textContent, /暂无任务/);
+  delete state.handlers.jobs;
+  h.$("jobs").querySelector("button").click();
+  await until(() => h.$("page-info").textContent === "51–62 / 62");
 });
 
 test("cancellation errors remain attached to the originating job", async (t) => {
@@ -939,9 +1092,11 @@ test("keyboard tabs, task selection, provider ARIA and terminal duration are con
 test("project search distinguishes an empty filter from empty task history", async (t) => {
   const h = await harness(t);
   h.input("search", "C:/Projects/project-b");
+  h.flushSearch();
   await until(() => h.$("jobs").querySelectorAll(".job").length === 1);
   assert.equal(h.$("jobs").querySelectorAll(".job").length, 1);
   h.input("search", "no-match");
+  h.flushSearch();
   await until(() => h.$("jobs").textContent.includes("没有匹配的任务"));
   assert.match(h.$("jobs").textContent, /没有匹配的任务/);
   h.$("jobs").querySelector("button").click();
@@ -987,6 +1142,7 @@ test("a late list response cannot refill a different view or search", async (t) 
   await tick();
   h.$("view-archived").click();
   h.input("search", "archived-only");
+  h.flushSearch();
   delete h.state.handlers.jobs;
   pending.resolve({
     jobs: clone(h.state.jobs),
@@ -1018,6 +1174,7 @@ test("server pagination and searching find tasks beyond the first fifty", async 
   await until(() => h.$("page-info").textContent === "51–62 / 62");
   assert.equal(h.$("page-next").disabled, true);
   h.input("search", "History 61");
+  h.flushSearch();
   await until(() => h.$("page-info").textContent === "1–1 / 1");
   assert.match(h.$("jobs").textContent, /History 61/);
   assert.equal(h.$("page-prev").disabled, true);

@@ -7,11 +7,22 @@ READ_TOOLS = ["Read", "Glob", "Grep"]
 EDIT_TOOLS = READ_TOOLS + ["Write", "Edit", "Bash"]
 
 
-def make_options(project, mode, profile, key, run_dir, events):
+def make_options(project, mode, profile, key, run_dir, events, failure=None):
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
     tools = EDIT_TOOLS if mode == "edit" else READ_TOOLS
+    failure = {} if failure is None else failure
 
     async def before(data, call_id, _context):
+        def stop(reason):
+            # Hook exceptions alone are swallowed by the native client. Explicitly
+            # deny this tool and stop the turn; the receiving loop reports failure.
+            failure["error"] = reason
+            return {"continue_": False, "stopReason": reason,
+                    "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": reason}}
+
+        if failure:
+            return stop(failure["error"])
         name = data.get("tool_name", "")
         allowed = name in tools
         values = data.get("tool_input", {})
@@ -25,7 +36,10 @@ def make_options(project, mode, profile, key, run_dir, events):
         if not allowed:
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                            "permissionDecisionReason": "Outside the assigned tool set or workspace."}}
-        events.tool(call_id or data.get("tool_use_id", name), name)
+        try:
+            events.tool(call_id or data.get("tool_use_id", name), name)
+        except RuntimeError as exc:
+            return stop(str(exc))
         return {}
 
     async def after(data, call_id, _context):
@@ -48,13 +62,18 @@ def make_options(project, mode, profile, key, run_dir, events):
 async def run(task, project, mode, profile, key, run_dir, events):
     from claude_agent_sdk import ClaudeSDKClient, StreamEvent, ResultMessage
     result = None
-    async with ClaudeSDKClient(options=make_options(project, mode, profile, key, run_dir, events)) as client:
+    failure = {}
+    async with ClaudeSDKClient(options=make_options(project, mode, profile, key, run_dir, events, failure)) as client:
         await client.query(task)
         async for message in client.receive_response():
+            if failure:
+                raise RuntimeError(failure["error"])
             if isinstance(message, StreamEvent) and message.event.get("type") == "message_start":
                 events.model(message.event.get("message", {}).get("id") or message.uuid)
             elif isinstance(message, ResultMessage):
                 if message.is_error:
                     raise RuntimeError("Claude Code 未完成任务：" + str(message.subtype))
                 result = message.result
+    if failure:
+        raise RuntimeError(failure["error"])
     return result or ""
