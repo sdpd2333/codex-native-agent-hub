@@ -45,6 +45,7 @@
         cursor: wait;
       }
       button:focus-visible,
+      summary:focus-visible,
       input:focus-visible,
       textarea:focus-visible,
       select:focus-visible {
@@ -279,7 +280,7 @@
       .archive-preview {
         margin-top: 12px;
       }
-      .context-note {
+      .hint.context-note {
         overflow-wrap: anywhere;
         margin: 0 0 12px;
       }
@@ -289,16 +290,26 @@
       .pager {
         margin-top: 12px;
       }
-      .completed-group {
+      .job-group {
         grid-column: 1 / -1;
         min-width: 0;
       }
-      .completed-group summary {
+      .job-group > summary,
+      .job-group > h3 {
         color: var(--muted);
+        font-size: 12px;
+        font-weight: 500;
+        margin: 0;
         padding: 6px 0 10px;
+      }
+      .job-group > summary {
         cursor: pointer;
       }
-      .completed-jobs {
+      .recent-completed > summary {
+        color: var(--accent);
+        font-weight: 650;
+      }
+      .job-group-items {
         display: flex;
         flex-direction: column;
         gap: 9px;
@@ -723,6 +734,82 @@
         margin-bottom: 14px;
         flex-wrap: wrap;
       }
+      .result-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .result {
+        max-height: 500px;
+        overflow: auto;
+        overflow-wrap: anywhere;
+        padding: 14px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fafbfd;
+      }
+      .result-raw {
+        font: 12px/1.75 Consolas, "Microsoft YaHei", monospace;
+        white-space: pre-wrap;
+      }
+      .markdown-body {
+        font-size: 13px;
+        line-height: 1.75;
+      }
+      .markdown-body > :first-child { margin-top: 0; }
+      .markdown-body > :last-child { margin-bottom: 0; }
+      .markdown-body h1,
+      .markdown-body h2,
+      .markdown-body h3,
+      .markdown-body h4,
+      .markdown-body h5,
+      .markdown-body h6 {
+        margin: 1.2em 0 0.6em;
+        line-height: 1.4;
+        font-weight: 650;
+      }
+      .markdown-body h1 { font-size: 20px; }
+      .markdown-body h2 { font-size: 18px; }
+      .markdown-body h3 { font-size: 16px; }
+      .markdown-body h4,
+      .markdown-body h5,
+      .markdown-body h6 { font-size: 14px; }
+      .markdown-body p,
+      .markdown-body ul,
+      .markdown-body ol,
+      .markdown-body pre,
+      .markdown-body blockquote,
+      .markdown-body .result-table { margin: 0 0 12px; }
+      .markdown-body ul,
+      .markdown-body ol { padding-left: 1.8em; }
+      .markdown-body li > p { margin: 0.4em 0; }
+      .markdown-body a { color: var(--accent); text-decoration: underline; }
+      .markdown-body code {
+        font-family: Consolas, "Microsoft YaHei", monospace;
+        font-size: 0.92em;
+        background: #eef1f5;
+        border-radius: 3px;
+        padding: 2px 4px;
+      }
+      .markdown-body pre {
+        max-height: none;
+        white-space: pre;
+        overflow-wrap: normal;
+        background: #f1f4f7;
+      }
+      .markdown-body pre code { background: none; padding: 0; font-size: inherit; }
+      .markdown-body blockquote {
+        border-left: 3px solid #98a7b5;
+        padding: 0 12px;
+        color: var(--muted);
+      }
+      .markdown-body blockquote > :last-child { margin-bottom: 0; }
+      .markdown-body hr { border: 0; border-top: 1px solid var(--line); margin: 18px 0; }
+      .result-table { overflow: auto; }
+      .result-table table { width: 100%; border-collapse: collapse; }
+      .result-table th,
+      .result-table td { min-width: 5em; padding: 7px 10px; border: 1px solid #ced6df; text-align: left; }
+      .result-table th { background: #edf2f6; font-weight: 650; }
       .section-row h3 {
         margin: 0;
       }
@@ -757,13 +844,17 @@
           padding: 16px;
         }
         .monitor {
-          grid-template-columns: 1fr;
+          grid-template-columns: minmax(0, 1fr);
         }
         .jobs {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
           max-height: 280px;
           overflow: auto;
+        }
+        .job-group-items {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         .job {
           padding: 11px;
@@ -863,6 +954,37 @@
       nav {
         flex-wrap: wrap;
       }
+      .settings-heading { max-width: 760px; margin: 0 auto 22px; }
+      .settings-heading h1 { margin: 0 0 8px; font-size: 24px; }
+      .settings-tabs { gap: 8px 20px; margin-top: 12px; }
+      .settings-tabs button { padding: 8px 0; }
+      .connection-tabs {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 4px;
+        padding: 4px;
+        margin-bottom: 16px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #edf1f3;
+      }
+      .connection-tabs button {
+        min-width: 0;
+        padding: 9px 6px;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .connection-tabs button[aria-selected="true"] {
+        background: #fff;
+        color: var(--accent);
+        font-weight: 650;
+        box-shadow: 0 1px 3px #162c221a;
+      }
+      .preference-hint { overflow-wrap: anywhere; }
+      .preference-field input, .preference-field select { max-width: 360px; }
     </style>
   </head>
   <body>
@@ -896,31 +1018,13 @@
           新建任务</button
         ><button
           type="button"
-          id="tab-storage"
-          tabindex="-1"
-          role="tab"
-          aria-selected="false"
-          aria-controls="storage"
-        >
-          存储管理</button
-        ><button
-          type="button"
-          id="tab-rules"
-          tabindex="-1"
-          role="tab"
-          aria-selected="false"
-          aria-controls="rules"
-        >
-          选型规则</button
-        ><button
-          type="button"
           id="tab-settings"
           tabindex="-1"
           role="tab"
           aria-selected="false"
           aria-controls="settings"
         >
-          连接设置
+          设置
         </button>
       </nav>
     </header>
@@ -975,85 +1079,6 @@
           role="status"
           hidden
         ></div>
-        <details class="archive-settings" id="archive-settings">
-          <summary>
-            归档规则与旧任务整理
-            <span id="archive-rule-summary">正在读取规则…</span>
-          </summary>
-          <div class="archive-body">
-            <p class="hint">
-              适用于本机所有对话。只自动归档成功完成的任务；运行中、失败、超时、中断和取消的任务保留。恢复后的任务免于自动归档，也不再进入旧任务批量预览。
-            </p>
-            <div class="archive-fields">
-              <label
-                ><input
-                  id="archive-enabled"
-                  type="checkbox"
-                  disabled
-                />启用自动归档</label
-              >
-              <label for="archive-days"
-                >成功完成
-                <input
-                  id="archive-days"
-                  type="number"
-                  min="1"
-                  max="3650"
-                  step="1"
-                  value="7"
-                  disabled
-                />
-                天后</label
-              >
-              <button
-                class="btn"
-                id="archive-policy-save"
-                type="button"
-                disabled
-              >
-                保存规则
-              </button>
-              <button class="btn" id="archive-policy-reload" type="button">
-                重新加载规则
-              </button>
-            </div>
-            <p class="hint">
-              服务启动、运行期间每分钟及读取任务列表时检查到期任务。归档保留结果和工作区，不释放磁盘空间；日志清理请使用「存储管理」。
-            </p>
-            <div
-              id="archive-policy-alert"
-              class="alert"
-              role="status"
-              hidden
-            ></div>
-            <div class="archive-preview">
-              <button class="btn" id="archive-preview" type="button">
-                预览未归属的已完成任务
-              </button>
-              <p class="hint">
-                整理所有项目中没有对话标识的旧任务，不受上方天数限制。先预览，再确认归档。
-              </p>
-              <div id="archive-preview-result" hidden>
-                <p class="hint" id="archive-preview-note" role="status"></p>
-                <ul class="cleanup-list" id="archive-preview-list"></ul>
-                <button
-                  class="btn primary"
-                  id="archive-bulk"
-                  type="button"
-                  disabled
-                >
-                  确认归档
-                </button>
-              </div>
-              <div
-                id="archive-bulk-alert"
-                class="alert"
-                role="status"
-                hidden
-              ></div>
-            </div>
-          </div>
-        </details>
         <div class="toolbar">
           <input
             type="search"
@@ -1089,78 +1114,6 @@
               >选择任务以查看阶段、工具活动和执行结果。
             </div>
           </div>
-        </div>
-      </section>
-      <section
-        id="storage"
-        role="tabpanel"
-        aria-labelledby="tab-storage"
-        hidden
-      >
-        <div class="form">
-          <div class="section-row">
-            <h1>存储管理</h1>
-            <button class="btn small" id="storage-refresh" type="button">
-              刷新统计
-            </button>
-          </div>
-          <p class="intro">
-            查看本机所有对话的任务数据。归档仅整理列表；清理旧运行日志才能释放空间。
-          </p>
-          <div class="card">
-            <div id="storage-metrics" class="storage-metrics"></div>
-            <p class="hint" id="storage-note" role="status">
-              正在读取存储统计…
-            </p>
-          </div>
-          <div class="card">
-            <h2>旧运行日志</h2>
-            <p class="hint">
-              保留最近指定天数的日志。更早且已结束的任务可手动清理 SDK
-              日志和会话缓存，任务标题、描述、最终结果和编辑工作区仍会保留。
-            </p>
-            <div class="field">
-              <label for="retention-days">日志保留天数</label>
-              <input
-                id="retention-days"
-                type="number"
-                min="1"
-                max="3650"
-                step="1"
-                value="30"
-                required
-              />
-            </div>
-            <div class="row">
-              <button class="btn" id="storage-save" type="button" disabled>
-                保存保留天数
-              </button>
-              <button class="btn primary" id="storage-preview" type="button">
-                预览可清理内容
-              </button>
-            </div>
-            <p class="hint">
-              默认 30 天，不会自动删除。预览 5
-              分钟内有效，点击下方清理按钮后才会执行。
-            </p>
-            <div id="cleanup-preview" hidden>
-              <p id="cleanup-summary"></p>
-              <ul
-                id="cleanup-list"
-                class="cleanup-list"
-                aria-label="待清理任务"
-              ></ul>
-              <button
-                class="btn danger"
-                id="storage-cleanup"
-                type="button"
-                disabled
-              >
-                清理列出的运行日志
-              </button>
-            </div>
-          </div>
-          <div class="alert" id="storage-alert" role="status" hidden></div>
         </div>
       </section>
       <section id="task" role="tabpanel" aria-labelledby="tab-task" hidden>
@@ -1293,7 +1246,7 @@
                 type="number"
                 value="600"
                 min="10"
-                max="1800"
+                max="86400"
                 step="1"
                 required
               />
@@ -1332,64 +1285,26 @@
           </div>
         </form>
       </section>
-      <section id="rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
-        <div class="form">
-          <h1>跨代理选型规则</h1>
-          <p class="intro">
-            按顺序匹配规则，各项条件同时满足时生效。Codex
-            理解任务意图，在允许的候选池内选择；执行仍使用对应的原生运行环境。
-          </p>
-          <div class="card">
-            <label class="choice" for="rules-enabled"
-              ><input id="rules-enabled" type="checkbox" />启用跨代理规则</label
-            >
-            <p class="hint">
-              关闭时沿用各代理的固定型号或自动选型。规则只影响新任务。每个代理使用连接设置中保存的独立连接。
-            </p>
-            <div class="row">
-              <button class="btn" type="button" id="rules-catalog">
-                刷新实时候选
-              </button>
-              <button class="btn" type="button" id="rules-add">添加规则</button>
-            </div>
-            <p class="hint" id="rules-catalog-status"></p>
-            <div id="rules-list"></div>
-            <div class="field">
-              <label for="rules-fallback">默认候选池</label
-              ><select
-                id="rules-fallback"
-                multiple
-                size="5"
-                class="rule-pool"
-              ></select>
-              <p class="hint">
-                无规则命中或允许回退的规则均不可用时使用。可按住 Ctrl
-                多选；顺序决定无人指定候选时的优先级。
-              </p>
-            </div>
-            <div class="row">
-              <button class="btn primary" type="button" id="rules-save">
-                保存规则
-              </button>
-              <button class="btn" type="button" id="rules-reload">
-                重新加载（清除规则草稿）
-              </button>
-              <button class="btn" type="button" id="rules-try">
-                到新建任务试选
-              </button>
-            </div>
-            <div class="alert" id="rules-alert" role="status" hidden></div>
-          </div>
+      <section id="settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+        <div class="settings-heading">
+          <h1>设置</h1>
+          <p class="intro">配置保存在本机，供使用同一状态目录的对话与项目共享。</p>
+          <nav class="settings-tabs" role="tablist" aria-label="设置分类">
+          <button type="button" id="tab-connections" role="tab" aria-controls="connections" aria-selected="true" tabindex="0">连接设置</button>
+          <button type="button" id="tab-rules" role="tab" aria-controls="rules" aria-selected="false" tabindex="-1">选型规则</button>
+          <button type="button" id="tab-runtime" role="tab" aria-controls="runtime" aria-selected="false" tabindex="-1">运行设置</button>
+          <button type="button" id="tab-interface" role="tab" aria-controls="interface" aria-selected="false" tabindex="-1">界面设置</button>
+          <button type="button" id="tab-storage" role="tab" aria-controls="storage" aria-selected="false" tabindex="-1">存储与归档</button>
+          </nav>
         </div>
-      </section>
       <section
-        id="settings"
+        id="connections"
         role="tabpanel"
-        aria-labelledby="tab-settings"
+        aria-labelledby="tab-connections"
         hidden
       >
         <div class="form">
-          <h1>连接你的模型</h1>
+          <h2>连接你的模型</h2>
           <p class="intro">
             三套配置独立保存。API Key 仅在本机输入，不会回显到聊天或任务列表。
           </p>
@@ -1417,7 +1332,17 @@
               DeepSeek<small>Harness / dsh</small>
             </button>
           </div>
-          <div class="card">
+          <div class="alert" id="settings-alert" role="status" hidden></div>
+          <p class="hint" id="draft-status" hidden></p>
+          <div class="alert error" id="settings-conflict" role="status" hidden></div>
+          <button class="btn" id="reload-config" type="button" hidden>
+            重新加载已保存配置（清除本地草稿）
+          </button>
+          <div class="connection-tabs" role="tablist" aria-label="连接配置方式">
+            <button type="button" id="tab-connection-manual" role="tab" aria-controls="connection-manual" aria-selected="true" tabindex="0">手动连接</button>
+            <button type="button" id="tab-connection-local" role="tab" aria-controls="connection-local" aria-selected="false" tabindex="-1">本地客户端</button>
+          </div>
+          <div class="card" id="connection-local" role="tabpanel" aria-labelledby="tab-connection-local" hidden>
             <h2>本地客户端配置</h2>
             <p class="hint">
               默认关闭。点击检测后只读取此代理的用户级连接配置；不会写回客户端，也不会导入工具、权限或提示词。
@@ -1483,7 +1408,7 @@
             </button>
             <div class="alert" id="local-alert" role="status" hidden></div>
           </div>
-          <div class="card">
+          <div class="card" id="connection-manual" role="tabpanel" aria-labelledby="tab-connection-manual">
             <div class="field">
               <label for="base-url">Base URL</label
               ><input
@@ -1553,26 +1478,8 @@
                 按能力档位选择、同档优先较新版本；DeepSeek 仅匹配
                 Flash。无法匹配时沿用默认模型。
               </p>
-              <details class="hint">
-                <summary>自定义选型策略</summary>
-                <p>
-                  编辑项目根目录的 <code>model_selection.py</code>
-                  可调整名称、排序与任务匹配规则，详见 README「自定义策略」。
-                  修改后重新加载 MCP 服务并重启面板。
-                </p>
-              </details>
+              <button class="btn small" type="button" id="open-rules">到选型规则自定义任务匹配与候选池</button>
             </div>
-            <div class="alert" id="settings-alert" role="status" hidden></div>
-            <p class="hint" id="draft-status" hidden></p>
-            <div
-              class="alert error"
-              id="settings-conflict"
-              role="status"
-              hidden
-            ></div>
-            <button class="btn" id="reload-config" type="button" hidden>
-              重新加载已保存配置（清除本地草稿）
-            </button>
             <div class="row">
               <button class="btn" id="test" type="button">测试基础生成</button
               ><button class="btn primary" id="save" type="button">
@@ -1582,14 +1489,245 @@
             <p class="hint">
               测试会使用少量接口额度，但不会保存配置。先保存，再提交只读任务验证流式响应和原生工具调用。
             </p>
-            <div class="runtime" id="runtime"></div>
+            <div class="runtime" id="runtime-info"></div>
           </div>
         </div>
+      </section>
+      <section id="rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+        <div class="form">
+          <h2>跨代理选型规则</h2>
+          <p class="intro">
+            按顺序匹配规则，各项条件同时满足时生效。Codex
+            理解任务意图，在允许的候选池内选择；执行仍使用对应的原生运行环境。
+          </p>
+          <div class="card">
+            <label class="choice" for="rules-enabled"
+              ><input id="rules-enabled" type="checkbox" />启用跨代理规则</label
+            >
+            <p class="hint">
+              关闭时沿用各代理的固定型号或自动选型。规则只影响新任务。每个代理使用连接设置中保存的独立连接。
+            </p>
+            <div class="row">
+              <button class="btn" type="button" id="rules-catalog">
+                刷新实时候选
+              </button>
+              <button class="btn" type="button" id="rules-add">添加规则</button>
+            </div>
+            <p class="hint" id="rules-catalog-status"></p>
+            <div id="rules-list"></div>
+            <div class="field">
+              <label for="rules-fallback">默认候选池</label
+              ><select
+                id="rules-fallback"
+                multiple
+                size="5"
+                class="rule-pool"
+              ></select>
+              <p class="hint">
+                无规则命中或允许回退的规则均不可用时使用。可按住 Ctrl
+                多选；顺序决定无人指定候选时的优先级。
+              </p>
+            </div>
+            <div class="row">
+              <button class="btn primary" type="button" id="rules-save">
+                保存规则
+              </button>
+              <button class="btn" type="button" id="rules-reload">
+                重新加载（清除规则草稿）
+              </button>
+              <button class="btn" type="button" id="rules-try">
+                到新建任务试选
+              </button>
+            </div>
+            <div class="alert" id="rules-alert" role="status" hidden></div>
+          </div>
+        </div>
+      </section>
+      <section id="runtime" role="tabpanel" aria-labelledby="tab-runtime" hidden>
+        <form class="form" id="runtime-form">
+          <h2>运行设置</h2>
+          <p class="intro">运行预算和默认时间应用于新任务，已有任务保留启动时设置。</p>
+          <div id="runtime-fields"></div>
+          <p class="hint" id="runtime-draft-status" role="status"></p>
+          <div class="alert" id="runtime-alert" role="status" hidden></div>
+          <div class="row">
+            <button class="btn primary" type="submit" id="runtime-save" disabled>保存运行设置</button>
+            <button class="btn" type="button" id="runtime-reset" disabled>恢复默认值（待保存）</button>
+            <button class="btn" type="button" id="runtime-reload">重新加载（清除本页草稿）</button>
+          </div>
+        </form>
+      </section>
+      <section id="interface" role="tabpanel" aria-labelledby="tab-interface" hidden>
+        <form class="form" id="interface-form">
+          <h2>界面设置</h2>
+          <p class="intro">保存后应用于面板；其他已打开面板在重新进入设置或回到窗口时读取。</p>
+          <div id="interface-fields"></div>
+          <p class="hint" id="interface-draft-status" role="status"></p>
+          <div class="alert" id="interface-alert" role="status" hidden></div>
+          <div class="row">
+            <button class="btn primary" type="submit" id="interface-save" disabled>保存界面设置</button>
+            <button class="btn" type="button" id="interface-reset" disabled>恢复默认值（待保存）</button>
+            <button class="btn" type="button" id="interface-reload">重新加载（清除本页草稿）</button>
+          </div>
+        </form>
+      </section>
+      <section
+        id="storage"
+        role="tabpanel"
+        aria-labelledby="tab-storage"
+        hidden
+      >
+        <div class="form">
+          <div class="section-row">
+            <h2>存储与归档</h2>
+            <button class="btn small" id="storage-refresh" type="button">
+              刷新统计
+            </button>
+          </div>
+          <p class="intro">
+            查看本机所有对话的任务数据。归档仅整理列表；清理旧运行日志才能释放空间。
+          </p>
+        <details class="archive-settings" id="archive-settings">
+          <summary>
+            归档规则与旧任务整理
+            <span id="archive-rule-summary">正在读取规则…</span>
+          </summary>
+          <div class="archive-body">
+            <p class="hint">
+              适用于本机所有对话。只自动归档成功完成的任务；运行中、失败、超时、中断和取消的任务保留。恢复后的任务免于自动归档，也不再进入旧任务批量预览。
+            </p>
+            <div class="archive-fields">
+              <label
+                ><input
+                  id="archive-enabled"
+                  type="checkbox"
+                  disabled
+                />启用自动归档</label
+              >
+              <label for="archive-days"
+                >成功完成
+                <input
+                  id="archive-days"
+                  type="number"
+                  min="1"
+                  max="3650"
+                  step="1"
+                  value="7"
+                  disabled
+                />
+                天后</label
+              >
+              <button
+                class="btn"
+                id="archive-policy-save"
+                type="button"
+                disabled
+              >
+                保存规则
+              </button>
+              <button class="btn" id="archive-policy-reload" type="button">
+                重新加载规则
+              </button>
+            </div>
+            <p class="hint">
+              服务启动、运行期间按设置的检查间隔及读取任务列表时检查到期任务。归档保留结果和工作区，不释放磁盘空间；日志清理请使用本页下方的日志清理。
+            </p>
+            <div
+              id="archive-policy-alert"
+              class="alert"
+              role="status"
+              hidden
+            ></div>
+            <div class="archive-preview">
+              <button class="btn" id="archive-preview" type="button">
+                预览未归属的已完成任务
+              </button>
+              <p class="hint">
+                整理所有项目中没有对话标识的旧任务，不受上方天数限制。先预览，再确认归档。
+              </p>
+              <div id="archive-preview-result" hidden>
+                <p class="hint" id="archive-preview-note" role="status"></p>
+                <ul class="cleanup-list" id="archive-preview-list"></ul>
+                <button
+                  class="btn primary"
+                  id="archive-bulk"
+                  type="button"
+                  disabled
+                >
+                  确认归档
+                </button>
+              </div>
+              <div
+                id="archive-bulk-alert"
+                class="alert"
+                role="status"
+                hidden
+              ></div>
+            </div>
+          </div>
+        </details>
+          <div class="card">
+            <div id="storage-metrics" class="storage-metrics"></div>
+            <p class="hint" id="storage-note" role="status">
+              正在读取存储统计…
+            </p>
+          </div>
+          <div class="card">
+            <h2>旧运行日志</h2>
+            <p class="hint">
+              保留最近指定天数的日志。更早且已结束的任务可手动清理 SDK
+              日志和会话缓存，任务标题、描述、最终结果和编辑工作区仍会保留。
+            </p>
+            <div class="field">
+              <label for="retention-days">日志保留天数</label>
+              <input
+                id="retention-days"
+                type="number"
+                min="1"
+                max="3650"
+                step="1"
+                value="30"
+                required
+              />
+            </div>
+            <div class="row">
+              <button class="btn" id="storage-save" type="button" disabled>
+                保存保留天数
+              </button>
+              <button class="btn primary" id="storage-preview" type="button">
+                预览可清理内容
+              </button>
+            </div>
+            <p class="hint">
+              默认 30 天，不会自动删除。预览 5
+              分钟内有效，点击下方清理按钮后才会执行。
+            </p>
+            <div id="cleanup-preview" hidden>
+              <p id="cleanup-summary"></p>
+              <ul
+                id="cleanup-list"
+                class="cleanup-list"
+                aria-label="待清理任务"
+              ></ul>
+              <button
+                class="btn danger"
+                id="storage-cleanup"
+                type="button"
+                disabled
+              >
+                清理列出的运行日志
+              </button>
+            </div>
+          </div>
+          <div class="alert" id="storage-alert" role="status" hidden></div>
+        </div>
+      </section>
       </section>
       <div class="footer">
         Native tools. Separate workspaces. One place to follow.
       </div>
     </main>
+    <script src="vendor/markdown-it.min.js" defer></script>
     <script src="dashboard.js" defer></script>
   </body>
 </html>

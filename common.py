@@ -78,6 +78,34 @@ def configuration_lock():
                     fcntl.flock(stream, fcntl.LOCK_UN)
 
 
+@contextmanager
+def profile_transaction(backend: str, *, include_sync: bool = False):
+    """Roll back synchronous failures without exposing a half-written connection."""
+    check_backend(backend)
+    names = ["settings.json", backend + ".dpapi"]
+    if include_sync:
+        names.append("local-sync.json")
+    with configuration_lock():
+        paths = [STATE_DIR / name for name in names]
+        previous = [path.read_bytes() if path.exists() else None for path in paths]
+        try:
+            yield
+        except Exception:
+            for path, old in zip(paths, previous):
+                if old is None:
+                    path.unlink(missing_ok=True)
+                elif not path.exists() or path.read_bytes() != old:
+                    _atomic_write(path, old)
+            raise
+
+
+def require_matching_environment_key(backend: str, key: str) -> None:
+    check_backend(backend)
+    override = os.environ.get("AGENT_HUB_" + backend.upper() + "_API_KEY", "").strip()
+    if override and override != key:
+        raise RelayError("环境变量中的 Key 优先于本地凭据且与本次 Key 不一致；请先移除或更新该覆盖，再保存或同步连接。")
+
+
 def profile_revision(backend: str) -> str:
     """Opaque version from profile data and credential-file metadata, never key material."""
     check_backend(backend)
@@ -254,7 +282,14 @@ class _NoCrossOriginRedirect(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def request_json(url: str, key: str, *, native: bool = False, payload: dict | None = None, backend: str = "gemini") -> dict:
+def request_json(url: str, key: str, *, native: bool = False, payload: dict | None = None, backend: str = "gemini",
+                 timeout: float | None = None) -> dict:
+    import app_settings
+    settings = app_settings.values()
+    timeout = min(settings["network_timeout_seconds"], settings["operation_timeout_seconds"],
+                  timeout if timeout is not None else settings["network_timeout_seconds"])
+    if timeout <= 0:
+        raise RelayError("读取模型目录超过操作等待时间，请调整运行设置后重试。")
     headers = {"Accept": "application/json", "User-Agent": "Codex-Native-Agent-Hub/0.1"}
     headers["x-goog-api-key" if native else "Authorization"] = key if native else "Bearer " + key
     if backend in ("claude", "deepseek"):
@@ -265,7 +300,7 @@ def request_json(url: str, key: str, *, native: bool = False, payload: dict | No
         body = json.dumps(payload).encode("utf-8")
     req = Request(url, data=body, headers=headers)
     try:
-        with build_opener(_NoCrossOriginRedirect()).open(req, timeout=45) as response:
+        with build_opener(_NoCrossOriginRedirect()).open(req, timeout=timeout) as response:
             # Model catalogs can be large, but never read an unbounded response.
             raw = response.read(8 * 1024 * 1024 + 1)
             if len(raw) > 8 * 1024 * 1024:
@@ -294,22 +329,27 @@ def request_json(url: str, key: str, *, native: bool = False, payload: dict | No
 
 
 def fetch_models(base_url: str, key: str, backend: str = "gemini") -> list[str]:
+    import app_settings
+    settings = app_settings.values()
+    deadline = time.monotonic() + settings["operation_timeout_seconds"]
     check_backend(backend)
     base_url = normalize_base(base_url)
     failures = []
     try:
         models = set()
         page = ""
-        for _ in range(25):
+        for _ in range(settings["model_catalog_max_pages"]):
             suffix = "?" + urlencode({"after_id": page}) if page else ""
-            data = request_json(base_url + "/v1/models" + suffix, key, backend=backend)
+            data = request_json(base_url + "/v1/models" + suffix, key, backend=backend, timeout=deadline - time.monotonic())
             models.update(str(item["id"]) for item in data.get("data", []) if isinstance(item, dict) and item.get("id"))
             if backend != "claude" or not data.get("has_more"):
                 break
             next_page = data.get("last_id", "")
             if not next_page or next_page == page:
-                break
+                raise RelayError("模型目录分页游标无效，未接受不完整列表。")
             page = next_page
+        else:
+            raise RelayError("模型目录仍有后续页；请在运行设置中提高模型列表页数上限。")
         if models:
             return sorted(models, key=str.casefold)
         failures.append("/v1/models 没有返回模型列表")
@@ -320,15 +360,21 @@ def fetch_models(base_url: str, key: str, backend: str = "gemini") -> list[str]:
     try:
         models = set()
         page = ""
-        for _ in range(25):
+        seen_pages = set()
+        for _ in range(settings["model_catalog_max_pages"]):
             url = base_url + "/v1beta/models" + ("?" + urlencode({"pageToken": page}) if page else "")
-            data = request_json(url, key, native=True)
+            data = request_json(url, key, native=True, timeout=deadline - time.monotonic())
             for item in data.get("models", []):
                 if isinstance(item, dict) and item.get("name"):
                     models.add(str(item["name"]).removeprefix("models/"))
             page = data.get("nextPageToken", "")
             if not page:
                 break
+            if page in seen_pages:
+                raise RelayError("模型目录分页游标重复，未接受不完整列表。")
+            seen_pages.add(page)
+        else:
+            raise RelayError("模型目录仍有后续页；请在运行设置中提高模型列表页数上限。")
         if models:
             return sorted(models, key=str.casefold)
         failures.append("/v1beta/models 没有返回模型列表")
@@ -338,11 +384,13 @@ def fetch_models(base_url: str, key: str, backend: str = "gemini") -> list[str]:
 
 
 def test_native_model(base_url: str, key: str, model: str, backend: str = "gemini") -> str:
+    import app_settings
     check_backend(backend)
     base = normalize_base(base_url)
     if backend in ("claude", "deepseek"):
         result = request_json(base + "/v1/messages", key, backend=backend,
-                              payload={"model": model, "max_tokens": 128, "messages": [{"role": "user", "content": "Reply with OK."}]})
+                              payload={"model": model, "max_tokens": app_settings.values()["connection_test_max_tokens"],
+                                       "messages": [{"role": "user", "content": "Reply with OK."}]})
         text = "".join(part.get("text", "") for part in result.get("content", []) if part.get("type") == "text")
     else:
         return _test_gemini(base, key, model)
@@ -352,10 +400,11 @@ def test_native_model(base_url: str, key: str, model: str, backend: str = "gemin
 
 
 def _test_gemini(base_url: str, key: str, model: str) -> str:
+    import app_settings
     model = model.removeprefix("models/")
     result = request_json(normalize_base(base_url) + "/v1beta/models/" + quote(model, safe="") + ":generateContent", key,
                           native=True, payload={"contents": [{"role": "user", "parts": [{"text": "Reply with OK."}]}],
-                                                "generationConfig": {"maxOutputTokens": 128}})
+                                                "generationConfig": {"maxOutputTokens": app_settings.values()["connection_test_max_tokens"]}})
     parts = [part.get("text", "") for candidate in result.get("candidates", [])
              for part in candidate.get("content", {}).get("parts", []) if not part.get("thought")]
     text = "".join(parts).strip()

@@ -3,12 +3,13 @@ from pathlib import Path
 import subprocess
 
 import common
+import app_settings
 
 
 def git(project: Path, *args: str) -> str:
     try:
         result = subprocess.run(["git", "-C", str(project), *args], capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", timeout=30,
+                                encoding="utf-8", errors="replace", timeout=app_settings.values()["git_timeout_seconds"],
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired):
         raise common.RelayError("Git 操作失败；请检查 Git 安装和仓库状态。") from None
@@ -41,5 +42,9 @@ def changes(workspace: dict) -> dict:
     base = workspace.get("base_commit", "HEAD")
     diff = git(root, "diff", "--no-ext-diff", "--no-textconv", base, "--")
     untracked = git(root, "ls-files", "--others", "--exclude-standard").splitlines()
-    return {"workspace": workspace, "diff": diff[:100000], "diff_truncated": len(diff) > 100000,
-            "untracked_files": untracked[:100], "note": "新增文件列在 untracked_files；未自动提交或合并。"}
+    settings = app_settings.values()
+    return {"workspace": workspace, "diff": diff[:settings["diff_max_chars"]],
+            "diff_truncated": len(diff) > settings["diff_max_chars"],
+            "untracked_files": untracked[:settings["diff_max_files"]],
+            "untracked_truncated": len(untracked) > settings["diff_max_files"],
+            "note": "新增文件列在 untracked_files；未自动提交或合并。"}

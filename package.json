@@ -2,12 +2,14 @@
   "name": "codex-native-agent-hub-panel-tests",
   "private": true,
   "scripts": {
-    "test": "node --test tests/dashboard.test.cjs",
+    "test": "node scripts/vendor-markdown.cjs --check && node --test tests/dashboard.test.cjs",
+    "vendor:markdown": "node scripts/vendor-markdown.cjs",
     "test:browser": "node tests/dashboard-browser.cjs"
   },
   "devDependencies": {
     "axe-core": "4.11.1",
     "jsdom": "27.4.0",
+    "markdown-it": "15.0.3",
     "playwright-core": "1.58.2"
   }
 }

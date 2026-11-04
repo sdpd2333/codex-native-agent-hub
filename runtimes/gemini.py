@@ -1,5 +1,6 @@
 """Gemini in the official Antigravity runtime."""
 from pathlib import Path
+import app_settings
 
 
 def instructions(project, mode):
@@ -11,9 +12,10 @@ def instructions(project, mode):
                "You may edit project files and run commands needed for this task. "))
 
 
-def make_config(base_url: str, key: str, model: str, project: Path, mode: str, run_dir: Path):
+def make_config(base_url: str, key: str, model: str, project: Path, mode: str, run_dir: Path, limits: dict | None = None):
     from google.antigravity import LocalAgentConfig, types
     from google.antigravity.hooks import policy
+    limits = app_settings.task_values() if limits is None else limits
     tools = [types.BuiltinTools.LIST_DIR, types.BuiltinTools.SEARCH_DIR, types.BuiltinTools.FIND_FILE,
              types.BuiltinTools.VIEW_FILE, types.BuiltinTools.FINISH]
     if mode == "edit":
@@ -24,7 +26,7 @@ def make_config(base_url: str, key: str, model: str, project: Path, mode: str, r
         models=[target], workspaces=[str(project)], system_instructions=instructions(project, mode),
         capabilities=types.CapabilitiesConfig(enable_subagents=False, enabled_tools=tools),
         policies=[policy.allow(tool.value) for tool in tools],
-        budget_config=types.BudgetConfig(max_model_calls=40, max_tool_calls=100),
+        budget_config=types.BudgetConfig(max_model_calls=limits["max_model_calls"], max_tool_calls=limits["max_tool_calls"]),
         save_dir=str(run_dir / "session"), app_data_dir=str(run_dir / "runtime"),
         env={"AGENT_HUB_GEMINI_API_KEY": "", "AGENT_HUB_CLAUDE_API_KEY": "", "AGENT_HUB_DEEPSEEK_API_KEY": "",
              "GOOGLE_API_KEY": "", "GEMINI_API_KEY": "", "ANTHROPIC_API_KEY": "", "OPENAI_API_KEY": ""})
@@ -32,6 +34,7 @@ def make_config(base_url: str, key: str, model: str, project: Path, mode: str, r
 
 async def run(task, project, mode, profile, key, run_dir, events):
     from google.antigravity import Agent
-    async with Agent(make_config(profile["base_url"], key, profile["model"], project, mode, run_dir)) as agent:
+    async with Agent(make_config(profile["base_url"], key, profile["model"], project, mode, run_dir,
+                                app_settings.task_values(profile))) as agent:
         response = await agent.chat(task)
         return await response.text()

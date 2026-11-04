@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import threading
+from collections import deque
+import app_settings
 
 LABELS = {
     "read": "读取文件", "view_file": "读取文件", "glob": "查找文件", "find_file": "查找文件",
@@ -14,12 +16,13 @@ LABELS = {
 
 
 class EventWriter:
-    def __init__(self, run_dir: Path):
+    def __init__(self, run_dir: Path, limits: dict | None = None):
         self.path = run_dir / "activity.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.models = set()
         self.tools = set()
         self.lock = threading.RLock()
+        self.limits = app_settings.task_values() if limits is None else limits.copy()
 
     def emit(self, kind, label):
         with self.lock:
@@ -32,8 +35,8 @@ class EventWriter:
             if identity not in self.models:
                 self.models.add(identity)
                 self.emit("model", "模型处理任务")
-                if len(self.models) > 40:
-                    raise RuntimeError("模型调用超过 40 次，已停止此任务。")
+                if len(self.models) > self.limits["max_model_calls"]:
+                    raise RuntimeError(f'模型调用超过 {self.limits["max_model_calls"]} 次，已停止此任务。')
 
     def tool(self, identity, name, *, done=False, failed=False):
         with self.lock:
@@ -41,22 +44,24 @@ class EventWriter:
                 if identity in self.tools:
                     return
                 self.tools.add(identity)
-                if len(self.tools) > 100:
-                    raise RuntimeError("工具调用超过 100 次，已停止此任务。")
+                if len(self.tools) > self.limits["max_tool_calls"]:
+                    raise RuntimeError(f'工具调用超过 {self.limits["max_tool_calls"]} 次，已停止此任务。')
             label = LABELS.get(str(name).lower(), "使用工具")
             if done:
                 label += " · 未成功" if failed else " · 已结束"
             self.emit("tool_end" if done else "tool", label)
 
 
-def read_activity(path: Path) -> dict:
+def read_activity(path: Path, event_limit: int = 30) -> dict:
     """Only normalized fields created by EventWriter are returned to the panel."""
     models = tools = 0
-    events = []
+    events = deque(maxlen=event_limit)
     try:
         with path.open("r", encoding="utf-8") as stream:
-            for number, line in enumerate(stream):
-                if number >= 2000 or len(line) > 4096:
+            # Bounded rows cover the largest supported budgets without losing counts.
+            for number in range(20000):
+                line = stream.readline(4097)
+                if not line or len(line) > 4096:
                     break
                 try:
                     row = json.loads(line)
@@ -78,5 +83,5 @@ def read_activity(path: Path) -> dict:
     except OSError:
         pass
     return {"phase": events[-1]["label"] if events else "正在启动运行环境", "model_calls": models,
-            "tool_calls": tools, "budget_model_calls": 40, "events": events[-30:],
+            "tool_calls": tools, "events": list(events),
             "last_activity_at": events[-1]["timestamp"] if events else None}

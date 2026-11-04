@@ -4,6 +4,8 @@ const { JSDOM } = require("jsdom");
 const {
   html,
   script,
+  markdownScript,
+  markdownResult,
   fixture,
   job,
   clone,
@@ -22,6 +24,127 @@ async function until(predicate) {
   assert.ok(predicate(), "Expected UI state did not arrive");
 }
 
+test("settings contains independent keyboard sub-tabs and preserves drafts between pages", async (t) => {
+  const h = await harness(t);
+  const ids = [...h.window.document.querySelectorAll("[id]")].map((node) => node.id);
+  assert.equal(new Set(ids).size, ids.length, "Every tab, field and diagnostic must have a unique ID");
+  assert.deepEqual([...h.window.document.querySelectorAll('header [role="tab"]')].map((node) => node.id),
+    ["tab-monitor", "tab-task", "tab-settings"]);
+  h.$("tab-settings").click();
+  await tick();
+  h.input("model", "connection-draft");
+  h.$("tab-runtime").click();
+  await tick();
+  h.input("pref-max_concurrent_tasks", "3");
+  h.$("tab-runtime").dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  assert.equal(h.window.document.activeElement.id, "tab-interface");
+  assert.equal(h.$("interface").hidden, false);
+  assert.equal(h.$("runtime").hidden, true);
+  assert.equal(h.$("runtime").tagName, "SECTION");
+  h.input("pref-jobs_page_size", "20");
+  h.$("tab-connections").click();
+  await tick();
+  assert.equal(h.$("model").value, "connection-draft");
+  h.$("tab-runtime").click();
+  await tick();
+  assert.equal(h.$("pref-max_concurrent_tasks").value, "3");
+  assert.equal(h.$("pref-jobs_page_size").value, "20");
+  h.$("runtime-save").click();
+  await until(() => h.$("runtime-alert").textContent.includes("设置已保存"));
+  assert.equal(h.state.config.app_settings.values.max_concurrent_tasks, 3);
+  assert.equal(h.state.config.app_settings.values.jobs_page_size, 50);
+  h.$("tab-interface").click();
+  await tick();
+  assert.equal(h.$("interface-save").disabled, false);
+  h.$("interface-save").click();
+  await until(() => h.$("interface-alert").textContent.includes("设置已保存"));
+  assert.equal(h.state.config.app_settings.values.jobs_page_size, 20);
+});
+
+test("preferences conflict keeps local values and reload only clears its own page", async (t) => {
+  const h = await harness(t);
+  h.$("tab-runtime").click();
+  await tick();
+  h.input("pref-max_concurrent_tasks", "4");
+  h.input("pref-jobs_page_size", "20");
+  h.state.config.app_settings.revision = "other-window";
+  h.state.config.app_settings.values.max_concurrent_tasks = 5;
+  h.state.config.app_settings.saved_values.max_concurrent_tasks = 5;
+  h.$("runtime-save").click();
+  await until(() => h.$("runtime-alert").textContent.includes("重新加载"));
+  assert.equal(h.$("pref-max_concurrent_tasks").value, "4");
+  assert.equal(h.$("runtime-save").disabled, true);
+  h.$("runtime-reload").click();
+  await until(() => h.$("runtime-alert").textContent.includes("已重新加载"));
+  assert.equal(h.$("pref-max_concurrent_tasks").value, "5");
+  assert.equal(h.$("pref-jobs_page_size").value, "20");
+});
+
+test("defaults are a draft, bounds reject invalid numbers and environment overrides remain explicit", async (t) => {
+  const state = fixture();
+  state.config.app_settings.values.max_concurrent_tasks = 3;
+  state.config.app_settings.overrides.max_concurrent_tasks = { environment: "AGENT_HUB_MAX_CONCURRENT_TASKS", value: 3 };
+  state.config.app_settings.values.task_timeout_seconds = 900;
+  state.config.app_settings.saved_values.task_timeout_seconds = 900;
+  const h = await harness(t, state);
+  h.$("tab-runtime").click();
+  await tick();
+  assert.equal(h.$("pref-max_concurrent_tasks").disabled, true);
+  assert.equal(h.$("pref-max_concurrent_tasks").value, "3");
+  assert.match(h.$("pref-max_concurrent_tasks-hint").textContent, /环境变量|AGENT_HUB_MAX_CONCURRENT_TASKS/);
+  h.input("pref-task_timeout_seconds", "0");
+  h.$("runtime-save").click();
+  assert.equal(state.calls.some((call) => call.action === "app-settings"), false);
+  h.$("runtime-reset").click();
+  assert.equal(h.$("pref-task_timeout_seconds").value, "600");
+  assert.equal(state.config.app_settings.values.task_timeout_seconds, 900);
+  h.$("runtime-save").click();
+  await until(() => h.$("runtime-alert").textContent.includes("设置已保存"));
+  const saved = state.calls.find((call) => call.action === "app-settings").payload;
+  assert.equal(saved.values.max_concurrent_tasks, 2);
+});
+
+test("saved interface preferences drive paging, polling and default result mode", async (t) => {
+  const state = fixture();
+  const preferences = { jobs_page_size: 10, result_page_chars: 2500, poll_interval_ms: 4000, default_result_view: "raw", task_timeout_seconds: 1200 };
+  Object.assign(state.config.app_settings.values, preferences);
+  Object.assign(state.config.app_settings.saved_values, preferences);
+  const h = await harness(t, state);
+  assert.equal(state.calls.find((call) => call.action === "jobs").payload.limit, 10);
+  assert.equal(state.calls.find((call) => call.action === "job" && call.payload.include_description === false).payload.max_chars, 2500);
+  assert.ok(h.$("detail").querySelector(".result-raw"));
+  assert.equal(h.$("task-timeout").value, "1200");
+  h.input("task-timeout", "123");
+  h.$("tab-settings").click();
+  await tick();
+  assert.equal(h.$("task-timeout").value, "123");
+  h.$("pause").click();
+  await until(() => [...h.timers.values()].some((timer) => timer.ms === 4000));
+});
+
+test("late configuration reads cannot overwrite saved preferences or an in-flight save", async (t) => {
+  const h = await harness(t);
+  h.$("tab-runtime").click();
+  await tick();
+  h.input("pref-max_concurrent_tasks", "4");
+  const old = clone(h.state.config), read = deferred(), save = deferred();
+  h.state.handlers.config = () => read.promise;
+  h.state.handlers["app-settings"] = () => save.promise;
+  h.$("tab-runtime").click();
+  h.$("runtime-save").click();
+  read.resolve(old);
+  await tick();
+  assert.equal(h.$("pref-max_concurrent_tasks").value, "4");
+  assert.equal(h.$("pref-max_concurrent_tasks").disabled, true);
+  const updated = clone(old.app_settings);
+  updated.saved_values.max_concurrent_tasks = updated.values.max_concurrent_tasks = 4;
+  updated.revision = "new-version";
+  save.resolve(updated);
+  await until(() => h.$("runtime-alert").textContent.includes("设置已保存"));
+  assert.equal(h.$("pref-max_concurrent_tasks").value, "4");
+  assert.equal(h.$("runtime-save").disabled, true);
+});
+
 test("local import is opt-in, stays per-agent and preserves connection drafts", async (t) => {
   const h = await harness(t);
   assert.equal(
@@ -30,11 +153,24 @@ test("local import is opt-in, stays per-agent and preserves connection drafts", 
   );
   h.$("tab-settings").click();
   await tick();
+  assert.equal(h.$("connection-manual").hidden, false);
+  assert.equal(h.$("connection-local").hidden, true);
+  h.input("model", "unsaved-choice");
+  h.$("tab-connection-manual").dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+  assert.equal(h.window.document.activeElement.id, "tab-connection-local");
+  assert.equal(h.$("connection-local").hidden, false);
+  assert.equal(h.$("connection-manual").hidden, true);
+  assert.equal(h.state.calls.some((c) => ["local-detect", "local-sync", "configure"].includes(c.action)), false);
   change(h, "local-mode", "follow");
   h.$("local-detect").click();
   await until(() => h.$("local-alert").textContent.includes("检测完成"));
   assert.match(h.$("local-source-info").textContent, /不回显/);
-  h.input("model", "unsaved-choice");
+  h.$("tab-connection-local").dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+  assert.equal(h.window.document.activeElement.id, "tab-connection-manual");
+  assert.equal(h.$("model").value, "unsaved-choice");
+  h.$("tab-connection-local").click();
+  assert.equal(h.$("local-mode").value, "follow");
+  assert.equal(h.$("local-source").value, "detect-token");
   h.$("local-apply").click();
   assert.match(h.$("local-alert").textContent, /先保存/);
   assert.equal(
@@ -373,6 +509,7 @@ async function harness(t, state = fixture()) {
       };
     }
   };
+  window.eval(markdownScript);
   window.eval(script);
   await until(() => $("sync").textContent.includes("更新于"));
   await until(
@@ -425,8 +562,8 @@ test("polling another job retains result selection, focus, scroll and pending co
     copy = h.findButton("复制完整结果");
   copy.focus();
   const range = h.window.document.createRange();
-  range.setStart(pre.firstChild, 0);
-  range.setEnd(pre.firstChild, 4);
+  range.setStart(pre.querySelector("p").firstChild, 0);
+  range.setEnd(pre.querySelector("p").firstChild, 4);
   h.window.getSelection().removeAllRanges();
   h.window.getSelection().addRange(range);
   pre.scrollTop = 70;
@@ -582,6 +719,102 @@ test("complete copy follows server offsets and includes astral Unicode past the 
     [0, 20000, 40000, 60000],
   );
   assert.match(h.$("detail").textContent, /完整结果已复制/);
+});
+
+test("results preview Markdown, retain per-task mode and copy the exact paginated source", async (t) => {
+  const state = fixture();
+  const full = markdownResult + "分页内容🙂\r\n".repeat(7000) + "\r\n**最后一页**\r\n";
+  state.results[state.jobs[0].job_id] = full;
+  state.jobs[0].result_chars = Array.from(full).length;
+  const h = await harness(t, state),
+    result = h.$("detail").querySelector(".result");
+  assert.equal(result.querySelector("h1").textContent, "审查结果");
+  assert.equal(result.querySelector("h2").textContent, "已完成");
+  assert.equal(result.querySelector("strong").textContent, "重点");
+  assert.equal(result.querySelector("em").textContent, "说明");
+  assert.equal(result.querySelectorAll("ul li").length, 2);
+  assert.equal(result.querySelectorAll("ol li").length, 2);
+  assert.equal(result.querySelectorAll("table tbody tr").length, 1);
+  assert.match(result.querySelector("pre code").textContent, /<script>literal<\/script>/);
+  assert.match(result.querySelector("blockquote").textContent, /引用说明/);
+  assert.equal(result.querySelector("a").target, "_blank");
+  assert.equal(result.querySelector("a").rel, "noopener noreferrer");
+  h.findButton("查看原文").click();
+  assert.equal(result.querySelector("h1"), null);
+  assert.equal(result.textContent, Array.from(full).slice(0, 20000).join(""));
+  h.select("b");
+  h.select("a");
+  assert.ok(h.findButton("Markdown 预览"));
+  h.findButton("Markdown 预览").click();
+  h.findButton("复制完整结果").click();
+  await until(() => state.clipboard === full);
+  assert.equal(result.querySelectorAll("strong")[1].textContent, "最后一页");
+  h.findButton("查看原文").click();
+  assert.equal(result.textContent, full);
+  state.clipboard = "";
+  h.findButton("复制完整结果").click();
+  await until(() => h.$("detail").textContent.includes("完整结果已复制"));
+  assert.equal(state.clipboard, full);
+});
+
+test("Markdown renders HTML and unsafe links as inert text and never loads images", async (t) => {
+  const state = fixture();
+  const full = [
+    '<script>window.previewAttack = true</script>',
+    '<img src=x onerror="window.previewAttack = true">',
+    '<svg onload="window.previewAttack = true"></svg>',
+    '[unsafe](javascript:alert(1))',
+    '[encoded](jav&#x61;script:alert(1))',
+    '[file](file:///tmp/private)',
+    '[data](data:text/html;base64,PHNjcmlwdD4=)',
+    '![remote <img>](https://example.com/tracker.png)',
+    '![inline](data:image/png;base64,aGVsbG8=)',
+    '[safe](https://example.com/ "quoted & title")',
+  ].join("\n\n");
+  state.results[state.jobs[0].job_id] = full;
+  state.jobs[0].result_chars = Array.from(full).length;
+  const h = await harness(t, state),
+    result = h.$("detail").querySelector(".result");
+  assert.equal(result.querySelectorAll("script, img, svg, iframe, object, style").length, 0);
+  assert.equal(result.querySelectorAll("a").length, 1);
+  assert.equal(result.querySelector("a").href, "https://example.com/");
+  assert.match(result.textContent, /图片：remote <img>/);
+  assert.match(result.textContent, /<script>window.previewAttack/);
+  assert.equal(h.window.previewAttack, undefined);
+  h.findButton("复制完整结果").click();
+  await until(() => state.clipboard === full);
+});
+
+test("plain text mode removes preview markup even when the text content is identical", async (t) => {
+  const state = fixture();
+  state.results[state.jobs[0].job_id] = "Hello\n";
+  state.jobs[0].result_chars = 6;
+  const h = await harness(t, state),
+    result = h.$("detail").querySelector(".result");
+  assert.equal(result.textContent, "Hello\n");
+  assert.ok(result.querySelector("p"));
+  h.findButton("查看原文").click();
+  assert.equal(result.textContent, "Hello\n");
+  assert.equal(result.children.length, 0);
+  await h.refresh();
+  assert.equal(result.children.length, 0);
+});
+
+test("Markdown reference links resolve when the next page arrives without duplicate source", async (t) => {
+  const state = fixture(),
+    first = "[结果链接][ref]\n\n";
+  const full = first + " ".repeat(20000 - Array.from(first).length) +
+    "\n\n[ref]: https://example.com/result\n";
+  state.results[state.jobs[0].job_id] = full;
+  state.jobs[0].result_chars = Array.from(full).length;
+  const h = await harness(t, state),
+    result = h.$("detail").querySelector(".result");
+  assert.equal(result.querySelector("a"), null);
+  h.findButton("加载更多").click();
+  await until(() => result.querySelector("a"));
+  assert.equal(result.querySelector("a").href, "https://example.com/result");
+  h.findButton("查看原文").click();
+  assert.equal(result.textContent, full);
 });
 
 test("pagination failure keeps loaded text and retries the failed page", async (t) => {
@@ -790,19 +1023,38 @@ test("server pagination and searching find tasks beyond the first fifty", async 
   assert.equal(h.$("page-prev").disabled, true);
 });
 
-test("completed groups remain collapsed while running tasks stay visible", async (t) => {
-  const h = await harness(t),
-    group = h.$("jobs").querySelector("details");
-  group.open = false;
-  h.state.jobs[1].progress.tool_calls++;
+test("finishing tasks stay above exceptions without losing selection, focus or collapsed history", async (t) => {
+  const state = fixture();
+  state.jobs.push(job("c", "completed"), job("d", "completed"), job("e", "completed"), job("f", "failed"));
+  const h = await harness(t, state);
+  const completed = h.$("jobs").querySelector(".completed-group"),
+    attention = h.$("jobs").querySelector(".attention-group"),
+    running = h.$("jobs").querySelector('[data-job-id="bbbbbbbbbbbbbbbb"]');
+  completed.open = attention.open = false;
+  running.click();
+  running.focus();
+  const finished = state.jobs.splice(1, 1)[0];
+  finished.status = "completed";
+  finished.finished_at = "2026-11-03T00:12:00Z";
+  state.jobs.unshift(finished); // The server promotes the newly completed task before paging.
   await h.refresh();
-  assert.equal(h.$("jobs").querySelector("details"), group);
-  assert.equal(group.open, false);
-  assert.equal(group.querySelectorAll(".job").length, 1);
-  assert.equal(
-    h.$("jobs").querySelector(":scope > .job").dataset.jobId,
-    "b".repeat(16),
-  );
+  const recent = h.$("jobs").querySelector(".recent-completed");
+  assert.equal(recent.querySelector(".job"), running);
+  assert.equal(running.getAttribute("aria-pressed"), "true");
+  assert.equal(h.window.document.activeElement, running);
+  assert.equal(h.$("detail").querySelector("h2").textContent, finished.title);
+  assert.equal(h.$("jobs").children[0], recent);
+  assert.equal(h.$("jobs").children[1], attention);
+  assert.equal(attention.open, false);
+  assert.equal(completed.open, false);
+  assert.equal(h.$("jobs").querySelectorAll(".job").length, state.jobs.length);
+  state.config.app_settings.values.recent_completed_count = 1;
+  await h.refresh();
+  assert.equal(recent.querySelectorAll(".job").length, 1);
+  assert.equal(completed.querySelectorAll(".job").length, 4);
+  change(h, "job-status", "completed");
+  await until(() => h.$("jobs").querySelectorAll(":scope > .job").length === 5);
+  assert.equal(h.$("jobs").querySelectorAll("details").length, 0);
 });
 
 test("storage uses a reviewed preview before cleanup and preserves editable retention on refresh", async (t) => {

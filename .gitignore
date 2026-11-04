@@ -14,11 +14,13 @@ runtime/
 runtime.json
 panel.json
 **/job.json
+**/result-*.txt
 **/management.json
 storage-policy.json
 archive-policy.json
 local-sync.json
 routing.json
+app-settings.json
 .nah-skill-install.json
 *.log
 *.bak

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
              "node_modules", "outputs", "test-results"}
 PRIVATE_NAMES = {"key.dpapi", "settings.json", "runtime.json", "panel.json", "job.json", "management.json",
-                 "storage-policy.json", "archive-policy.json", "local-sync.json", "routing.json",
+                 "storage-policy.json", "archive-policy.json", "local-sync.json", "routing.json", "app-settings.json",
                  ".nah-skill-install.json", ".env", "id_rsa", "id_ed25519"}
 PRIVATE_SUFFIXES = {".log", ".pem", ".key", ".p12", ".pfx", ".sqlite", ".sqlite3", ".bak", ".dpapi", ".jsonl"}
 PATTERNS = {
@@ -43,6 +43,7 @@ def audit(root: Path = ROOT) -> tuple[int, list[str]]:
         if not path.is_file():
             continue
         if (path.name in PRIVATE_NAMES or path.suffix.lower() in PRIVATE_SUFFIXES
+                or re.fullmatch(r"result-[0-9a-f]{64}\.txt", path.name)
                 or path.name.startswith(".env.") and path.name != ".env.example"
                 or ".state" in relative.parts):
             issues.append(f"{relative.as_posix()}: local/private artifact")

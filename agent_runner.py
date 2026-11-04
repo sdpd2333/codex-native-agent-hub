@@ -24,7 +24,7 @@ def main():
         if not args.project.is_absolute() or not project.is_dir():
             raise common.RelayError('项目目录必须为存在的绝对路径。')
         args.run_dir.mkdir(parents=True, exist_ok=True)
-        events = EventWriter(args.run_dir)
+        events = EventWriter(args.run_dir, limits=payload['profile'].get('runtime_settings'))
         events.emit('started', '正在启动运行环境')
         result = asyncio.run(runtimes.run(args.backend, payload['task'], project, args.mode,
                                          payload['profile'], key, args.run_dir, events))

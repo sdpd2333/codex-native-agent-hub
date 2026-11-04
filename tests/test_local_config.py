@@ -136,6 +136,51 @@ class LocalConfigTests(unittest.TestCase):
         self.client.write_text('{"bad":"fixture-key"')
         self.assertNotIn('fixture-key', json.dumps(local_config.detect('claude')))
 
+    def test_importing_only_key_requires_the_same_destination(self):
+        common.save_settings('https://other.example.com', 'claude-fixture', 'claude')
+        common.save_key('original-fixture', 'claude')
+        with self.assertRaisesRegex(common.RelayError, '来源地址'):
+            self.apply('import', ['api_key'])
+        self.assertEqual(common.load_key('claude'), 'original-fixture')
+        self.assertEqual(local_config.status('claude')['mode'], 'off')
+
+    def test_key_only_follow_rotates_at_same_address_but_blocks_provider_switch(self):
+        self.apply('import')
+        self.apply('follow', ['api_key'])
+        self.write_client(key='rotated-fixture', base='http://127.0.0.1:4567/v1')
+        local_config.require_ready('claude')
+        self.assertEqual(common.load_key('claude'), 'rotated-fixture')
+        self.write_client(key='other-provider-fixture', base='https://other.example.com')
+        with self.assertRaises(common.RelayError):
+            local_config.require_ready('claude')
+        self.assertEqual(local_config.status('claude')['status'], 'blocked')
+        self.assertEqual(common.load_settings('claude')['base_url'], 'http://127.0.0.1:4567')
+        self.assertEqual(common.load_key('claude'), 'rotated-fixture')
+        self.apply('follow', ['base_url', 'api_key'])
+        local_config.require_ready('claude')
+        self.assertEqual(common.load_settings('claude')['base_url'], 'https://other.example.com')
+        self.assertEqual(common.load_key('claude'), 'other-provider-fixture')
+
+    def test_failed_follow_refresh_restores_key_before_marking_blocked(self):
+        self.apply('follow')
+        self.write_client(key='replacement-fixture')
+        with patch.object(common, 'save_settings', side_effect=OSError('disk failure')):
+            local_config.refresh('claude')
+        self.assertEqual(common.load_key('claude'), 'fixture-key')
+        self.assertEqual(local_config.status('claude')['status'], 'blocked')
+
+    def test_legacy_mismatched_follow_blocks_even_with_unchanged_fingerprint(self):
+        self.apply('import')
+        self.apply('follow', ['api_key'])
+        common.save_settings('https://old-destination.example.com', 'claude-fixture', 'claude')
+        state = local_config._state()
+        state['profiles']['claude']['managed_version'] = local_config._managed_version('claude', ['api_key'])
+        local_config._write(state)
+        with self.assertRaises(common.RelayError):
+            local_config.require_ready('claude')
+        self.assertEqual(local_config.status('claude')['status'], 'blocked')
+        self.assertEqual(common.load_key('claude'), 'fixture-key')
+
     def test_gemini_api_key_and_oauth_distinction(self):
         directory = self.home / '.gemini'
         directory.mkdir()

@@ -206,7 +206,7 @@ def cleanup(token) -> dict:
         directory = progress.job_dir(job_id)
         try:
             safe_stat(directory / "job.json")
-            job = progress.load_job(job_id)
+            job = progress.load_job(job_id, load_external_result=False)
             if not job or not ended_before(job, plan["cutoff"]) or job["finished_at"] != item["finished_at"]:
                 result["skipped_files"] += len(item["files"])
                 continue
@@ -218,7 +218,7 @@ def cleanup(token) -> dict:
                 safe_stat(directory / "management.json")
             except FileNotFoundError:
                 pass
-            summary = progress.snapshot(job, include_result=False)["progress"]
+            summary = progress.snapshot(job, include_result=False, complete_activity=True)["progress"]
             # Save counters before any deletion, including if the process later stops mid-cleanup.
             progress.update_management(job_id, activity_summary=summary, logs_cleaned_at=progress.now())
         except (OSError, common.RelayError):

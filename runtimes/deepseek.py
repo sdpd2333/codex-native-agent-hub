@@ -1,6 +1,7 @@
 """Drive the packaged dsh runtime through its official Python SDK."""
 import asyncio
 import json
+import app_settings
 from runtimes.gemini import instructions
 
 
@@ -17,7 +18,8 @@ def make_config(project, mode, profile, key, run_dir):
     patch_path.write_text(json.dumps(patches), encoding="utf-8")
     return DeepSeekHarnessConfig(cwd=str(project), runtime_cwd=str(project),
         profile="sdk-minimal" if mode == "review" else "sdk", base_url=profile["base_url"].rstrip("/") + "/v1",
-        api_key=key, model=profile["model"], reasoning_effort=profile.get("effort") or None, max_tokens=8192,
+        api_key=key, model=profile["model"], reasoning_effort=profile.get("effort") or None,
+        max_tokens=app_settings.task_values(profile)["deepseek_max_tokens"],
         patches=(str(patch_path),), dsh_home=str(run_dir / "dsh"),
         env={"DSH_TELEMETRY_DISABLED": "1", "DSH_MAX_TOKENS_AS_SUCCESS": "false",
              "DSH_SYSTEM_PROMPT": instructions(project, mode)})

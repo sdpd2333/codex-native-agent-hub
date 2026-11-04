@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath $runtimePython)) {
 
 & $runtimePython -m pip install -r (Join-Path $PSScriptRoot 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed.' }
-& $runtimePython -c "import mcp; from google.antigravity import Agent; from claude_agent_sdk import ClaudeSDKClient; from deepseek_harness import DeepSeekHarness; import json, runtimes; print(json.dumps(runtimes.doctor()))"
+& $runtimePython -c "import sys; sys.path.insert(0, sys.argv[1]); import mcp; from google.antigravity import Agent; from claude_agent_sdk import ClaudeSDKClient; from deepseek_harness import DeepSeekHarness; import json, runtimes; print(json.dumps(runtimes.doctor()))" $PSScriptRoot
 if ($LASTEXITCODE -ne 0) { throw 'Runtime verification failed.' }
 
 if (-not $SkipMcpRegistration) {

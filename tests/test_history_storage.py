@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import common
+import app_settings
 import events
 import history
 import progress
@@ -86,6 +88,29 @@ class HistoryStorageTests(unittest.TestCase):
         self.assertEqual((result["running_count"], result["other_running_count"]), (1, 1))
         self.assertEqual(history.query(status="attention", search="legacy")["total"], 1)
         self.assertEqual(history.query(view="current")["total"], 0)
+
+    def test_recent_completions_are_promoted_before_paging_and_respect_scope_and_settings(self):
+        app_settings.save({"recent_completed_count": 1}, app_settings.read()["revision"])
+        live = self.job(1, status="running", _pid=os.getpid(), finished_at=None)
+        recent = self.job(2, started_at=self.old.isoformat(), finished_at="2026-11-04T22:00:00+08:00")
+        failed = self.job(3, status="failed", started_at="2026-11-04T14:00:30Z", finished_at="2026-11-04T14:01:00Z")
+        older = self.job(4, started_at="2026-11-04T13:58:00Z", finished_at="2026-11-04T13:59:00Z")
+        self.job(5, conversation_id="other-chat", finished_at="2026-11-04T14:03:00Z")
+        archived = self.job(6, finished_at="2026-11-04T14:04:00Z")
+        history.archive(archived["job_id"], True)
+        first = history.query(conversation="chat-a", view="current", limit=2)
+        self.assertEqual([j["job_id"] for j in first["jobs"]], [live["job_id"], recent["job_id"]])
+        second = history.query(conversation="chat-a", view="current", offset=2, limit=2)
+        self.assertEqual([j["job_id"] for j in second["jobs"]], [failed["job_id"], older["job_id"]])
+        self.assertEqual(first["recent_completed_ids"], [recent["job_id"]])
+        self.assertEqual(second["recent_completed_ids"], first["recent_completed_ids"])
+        complete = history.query(conversation="chat-a", view="current", status="completed")
+        self.assertEqual([j["job_id"] for j in complete["jobs"]], [recent["job_id"], older["job_id"]])
+        self.assertEqual(complete["recent_completed_ids"], [])
+        app_settings.save({"recent_completed_count": 0}, app_settings.read()["revision"])
+        disabled = history.query(conversation="chat-a", view="current", limit=2)
+        self.assertEqual([j["job_id"] for j in disabled["jobs"]], [live["job_id"], failed["job_id"]])
+        self.assertEqual(disabled["recent_completed_ids"], [])
 
     def test_unchanged_history_does_not_reread_full_results_but_worker_updates_invalidate_cache(self):
         job = self.job(result="result" * 10000)
@@ -184,6 +209,42 @@ class HistoryStorageTests(unittest.TestCase):
             self.log(self.job(index, **value))
         self.log(self.job(7), old=False)
         self.assertEqual(storage.preview(30)["file_count"], 0)
+
+    def test_cleanup_finishes_large_gemini_transcripts_with_cold_or_partial_trackers(self):
+        rows = [json.dumps({"step_index": i, "type": "PLANNER_RESPONSE", "status": "DONE",
+                            "created_at": self.old.isoformat(), "tool_calls": [{"name": "view_file"}],
+                            "content": "x" * 300000}) for i in range(10)]
+        data = "\n".join(rows).encode()  # Include a final row without a newline.
+        for warm in (False, True):
+            with self.subTest(partial_tracker=warm):
+                job = self.job(1 + int(warm), backend="gemini")
+                transcript = self.log(job, "runtime/brain/session/transcript.jsonl", data)
+                if warm:
+                    self.assertLess(progress.snapshot(job)["progress"]["model_calls"], 10)
+                plan = storage.preview(30)
+                self.assertEqual(storage.cleanup(plan["token"])["deleted_files"], 1)
+                self.assertFalse(transcript.exists())
+                progress._trackers.clear()
+                summary = progress.snapshot(job)["progress"]
+                self.assertEqual((summary["model_calls"], summary["tool_calls"]), (10, 10))
+
+    def test_cleanup_keeps_transcript_when_its_final_summary_cannot_be_read(self):
+        job = self.job(backend="gemini")
+        transcript = self.log(job, "runtime/brain/session/transcript.jsonl", b'{}\n')
+        plan = storage.preview(30)
+        original = Path.open
+
+        def fail(path, *args, **kwargs):
+            if path == transcript:
+                raise PermissionError("fixture read failure")
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "open", new=fail):
+            result = storage.cleanup(plan["token"])
+        self.assertEqual(result["deleted_files"], 0)
+        self.assertEqual(result["errors"], 1)
+        self.assertTrue(transcript.exists())
+        self.assertNotIn("logs_cleaned_at", progress.load_management(job["job_id"]))
 
     def test_changed_files_and_new_files_are_preserved(self):
         job = self.job()

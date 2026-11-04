@@ -1,0 +1,22 @@
+{
+  "max_concurrent_tasks": {"group": "runtime", "section": "任务运行", "label": "每个服务实例的并发任务数", "default": 2, "min": 1, "max": 8, "hint": "所有代理共享名额。降低后不终止已有任务，名额释放后才接收新任务。"},
+  "task_timeout_seconds": {"group": "runtime", "section": "任务运行", "label": "任务默认最长运行时间（秒）", "default": 600, "min": 10, "max": 86400, "hint": "新任务使用此值；提交任务时仍可单独指定。"},
+  "max_model_calls": {"group": "runtime", "section": "原生代理预算", "label": "单任务模型调用上限", "default": 40, "min": 1, "max": 1000, "hint": "适用于三个代理。额度只约束新任务，已启动任务保留启动时的预算。"},
+  "max_tool_calls": {"group": "runtime", "section": "原生代理预算", "label": "单任务工具调用上限", "default": 100, "min": 1, "max": 5000, "hint": "适用于三个代理；独立于模型调用次数。"},
+  "claude_max_turns": {"group": "runtime", "section": "原生代理预算", "label": "Claude 最多交互轮次", "default": 40, "min": 1, "max": 1000, "hint": "同时受上方模型和工具预算约束。"},
+  "deepseek_max_tokens": {"group": "runtime", "section": "原生代理预算", "label": "DeepSeek 单次输出 token 上限", "default": 8192, "min": 128, "max": 131072, "hint": "实际可用额度取决于所选模型和服务商。"},
+  "network_timeout_seconds": {"group": "runtime", "section": "连接与维护", "label": "模型列表和基础生成的网络超时（秒）", "default": 45, "min": 5, "max": 300, "hint": "每次网络请求的等待时间；原生 SDK 任务由任务运行时间和预算约束。"},
+  "operation_timeout_seconds": {"group": "runtime", "section": "连接与维护", "label": "面板长操作最长等待时间（秒）", "default": 150, "min": 10, "max": 7200, "hint": "用于模型目录、连接测试、提交任务和读取变更等操作。目录分页也受此总时间约束。"},
+  "model_catalog_max_pages": {"group": "runtime", "section": "连接与维护", "label": "模型列表最多读取页数", "default": 25, "min": 1, "max": 1000, "hint": "达到上限但仍有后续页时报告错误，避免把不完整列表当作完整候选。"},
+  "connection_test_max_tokens": {"group": "runtime", "section": "连接与维护", "label": "基础生成测试的输出 token 上限", "default": 128, "min": 16, "max": 65536, "hint": "仅用于连接页的基础生成测试。"},
+  "maintenance_interval_seconds": {"group": "runtime", "section": "连接与维护", "label": "本地配置同步与归档检查间隔（秒）", "default": 60, "min": 10, "max": 3600, "hint": "保存后下一轮维护等待使用新间隔。读取配置或任务列表时也会检查。"},
+  "git_timeout_seconds": {"group": "runtime", "section": "连接与维护", "label": "单次 Git 操作超时（秒）", "default": 30, "min": 5, "max": 600, "hint": "用于工作区准备和查看代码变更；任务仍受总运行时间约束。"},
+  "poll_interval_ms": {"group": "interface", "section": "任务列表与结果", "label": "任务自动刷新间隔（毫秒）", "default": 1500, "min": 500, "max": 60000, "hint": "页面隐藏或手动暂停时停止刷新；连接失败会自动延长间隔。"},
+  "jobs_page_size": {"group": "interface", "section": "任务列表与结果", "label": "每页任务数", "default": 50, "min": 10, "max": 100, "hint": "修改后列表回到第一页。"},
+  "recent_completed_count": {"group": "interface", "section": "任务列表与结果", "label": "优先展示最近完成的任务数", "default": 3, "min": 0, "max": 20, "hint": "按完成时间选取，显示在运行中任务之后、异常任务之前。0 表示不单独展示；异常任务仍优先于其余完成任务。"},
+  "result_page_chars": {"group": "interface", "section": "任务列表与结果", "label": "每次读取结果的字符数", "default": 20000, "min": 100, "max": 50000, "hint": "影响分段加载大小；复制完整结果仍会读取全部原文。"},
+  "default_result_view": {"group": "interface", "section": "任务列表与结果", "label": "结果默认显示方式", "default": "markdown", "options": {"markdown": "Markdown 预览", "raw": "原文"}, "hint": "应用于首次打开的任务；已打开任务保留当前显示方式。"},
+  "activity_event_limit": {"group": "interface", "section": "活动与代码变更", "label": "显示最近活动条数", "default": 30, "min": 5, "max": 200, "hint": "调用统计仍计算完整活动。日志清理后可显示的条数受保留摘要限制。"},
+  "diff_max_chars": {"group": "interface", "section": "活动与代码变更", "label": "代码差异预览最多字符数", "default": 100000, "min": 1000, "max": 1000000, "hint": "超出时标记截断，完整内容保留在工作区。"},
+  "diff_max_files": {"group": "interface", "section": "活动与代码变更", "label": "未跟踪文件最多展示数量", "default": 100, "min": 10, "max": 1000, "hint": "只限制展示数量，不删除文件。"}
+}

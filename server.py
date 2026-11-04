@@ -17,6 +17,7 @@ from typing import Literal
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import common
+import app_settings
 import dashboard
 import history
 import model_selection
@@ -35,6 +36,16 @@ NETWORK_READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWor
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def max_concurrent_tasks() -> int:
+    return app_settings.values()["max_concurrent_tasks"]
+
+
+def require_task_capacity() -> None:
+    limit = max_concurrent_tasks()
+    if sum(job["status"] == "running" for job in JOBS.values()) >= limit:
+        raise common.RelayError(f"已有 {limit} 个任务运行中，请等待完成或取消其中一个。")
 
 
 async def stop_process(process):
@@ -77,7 +88,11 @@ async def lifespan(_server):
             except (OSError, common.RelayError):
                 pass  # The panel exposes policy errors; do not stop active SDK tasks.
             try:
-                await asyncio.wait_for(stop_maintenance.wait(), timeout=60)
+                interval = app_settings.values()["maintenance_interval_seconds"]
+            except common.RelayError:
+                interval = app_settings.DEFAULTS["maintenance_interval_seconds"]
+            try:
+                await asyncio.wait_for(stop_maintenance.wait(), timeout=interval)
             except TimeoutError:
                 pass
 
@@ -145,8 +160,11 @@ def profile_status(backend: str) -> dict:
 def get_configuration(backend: Literal["gemini", "claude", "deepseek"] = "gemini") -> dict:
     """Read independent connection profiles and installed SDK versions. Never returns credentials."""
     common.check_backend(backend)
+    preferences = app_settings.read()
     return {**profile_status(backend), "profiles": {name: profile_status(name) for name in common.PROVIDERS},
             "runtimes": runtimes.doctor(), "routing_policy": routing.policy(), "default_project_dir": "",
+            "max_concurrent_tasks": preferences["values"]["max_concurrent_tasks"],
+            "app_settings": preferences,
             "configuration_launcher": str(common.APP_DIR / "configure.cmd"),
             "note": "Connection tests check generation. A task also verifies streaming and native tool compatibility."}
 
@@ -189,6 +207,12 @@ def panel_credentials(payload: dict, backend: str) -> tuple[str, str, str]:
 async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
     context = payload.get("_panel_context", {})
     conversation = context.get("conversation_id", "")
+    if action == "panel":
+        return await get_panel(payload.get("project_dir", ""), payload.get("conversation_id", ""))
+    if action == "app-settings":
+        if method == "GET":
+            return app_settings.read()
+        return app_settings.save(payload.get("values"), payload.get("revision"))
     if action == "routing":
         if method == "GET":
             return routing.policy()
@@ -205,7 +229,8 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
     if action == "jobs":
         return await asyncio.to_thread(history.query, conversation=conversation,
             view=payload.get("view", "current" if conversation else "all"), search=payload.get("search", ""),
-            status=payload.get("status", "all"), offset=payload.get("offset", 0), limit=payload.get("limit", 50)) | {"updated_at": now()}
+            status=payload.get("status", "all"), offset=payload.get("offset", 0),
+            limit=payload.get("limit", app_settings.values()["jobs_page_size"])) | {"updated_at": now()}
     if action == "archive":
         return await asyncio.to_thread(history.archive, payload.get("job_id", ""), payload.get("archived"))
     if action == "archive-policy":
@@ -256,9 +281,10 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
             automatic = payload.get("auto_select_model", common.load_settings(backend)["auto_select_model"])
             if not isinstance(automatic, bool):
                 raise common.RelayError("自动选择适配模型必须为布尔值。")
-            with common.configuration_lock():
+            with common.profile_transaction(backend):
                 common.require_revision(backend, payload.get("revision"))
                 if entered:
+                    common.require_matching_environment_key(backend, entered)
                     common.save_key(entered, backend)
                 common.save_settings(base, profile["model"], backend, profile["effort"], automatic)
             return {"ok": True, **get_configuration(backend), "panel_context": context,
@@ -270,7 +296,7 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
     if action == "tasks":
         return await submit_task(payload.get("task"), payload.get("project_dir"), backend=backend,
             mode=payload.get("mode", "review"), model=payload.get("model") or None,
-            timeout_seconds=payload.get("timeout_seconds", 600), workspace_mode=payload.get("workspace_mode", "worktree"),
+            timeout_seconds=payload.get("timeout_seconds"), workspace_mode=payload.get("workspace_mode", "worktree"),
             task_complexity=payload.get("task_complexity"), title=payload.get("title"),
             task_kind=payload.get("task_kind", "general"),
             conversation_id=conversation,
@@ -282,7 +308,7 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
         return await get_changes(str(payload.get("job_id", "")))
     if action == "job":
         return await get_job(str(payload.get("job_id", "")), offset=payload.get("offset", 0),
-                             max_chars=payload.get("max_chars", 20000),
+                             max_chars=payload.get("max_chars", app_settings.values()["result_page_chars"]),
                              include_description=payload.get("include_description", True))
     raise common.RelayError("接口不存在。")
 
@@ -314,8 +340,9 @@ def preview_routing(token: str, matched_intents: list[str] | None = None, candid
 async def list_models(backend: Literal["gemini", "claude", "deepseek"] = "gemini", query: str = "") -> dict:
     """Fetch exact available model IDs for one connection profile. Empty query returns all IDs."""
     local_config.require_ready(backend)
-    settings = common.load_settings(backend)
-    models = await asyncio.to_thread(common.fetch_models, settings["base_url"], common.load_key(backend), backend)
+    with common.configuration_lock():
+        settings, key = common.load_settings(backend), common.load_key(backend)
+    models = await asyncio.to_thread(common.fetch_models, settings["base_url"], key, backend)
     matches = [model for model in models if query.casefold() in model.casefold()]
     return {"backend": backend, "models": matches, "matched_count": len(matches), "total_count": len(models),
             "selected": settings["model"], "model_candidates": model_selection.catalog(matches, backend),
@@ -344,10 +371,11 @@ async def test_connection(backend: Literal["gemini", "claude", "deepseek"] = "ge
 
     For native SDK connectivity use submit_task(task_kind="connectivity") without model.
     """
-    settings = common.load_settings(backend)
+    with common.configuration_lock():
+        settings, key = common.load_settings(backend), common.load_key(backend)
     if not settings["model"]:
         raise common.RelayError("请先在面板选择并保存模型。")
-    result = await asyncio.to_thread(common.test_native_model, settings["base_url"], common.load_key(backend), settings["model"], backend)
+    result = await asyncio.to_thread(common.test_native_model, settings["base_url"], key, settings["model"], backend)
     return {"ok": True, "backend": backend, "model": settings["model"], "reply": result,
             "note": "Basic generation passed. A delegated review additionally checks SDK streaming and native tools."}
 
@@ -413,7 +441,7 @@ async def execute(job: dict, task: str, timeout_seconds: int, profile: dict, key
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True))
 async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "claude", "deepseek"] = "gemini",
                       mode: Literal["review", "edit"] = "review", model: str | None = None,
-                      timeout_seconds: int = 600, workspace_mode: Literal["worktree", "direct"] = "worktree",
+                      timeout_seconds: int | None = None, workspace_mode: Literal["worktree", "direct"] = "worktree",
                       task_complexity: Literal["simple", "standard", "complex"] | None = None,
                       title: str | None = None, task_kind: Literal["general", "connectivity"] = "general",
                       model_override_reason: str | None = None, conversation_id: str = "",
@@ -427,6 +455,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     Supply a short title (up to 80 characters); task retains the full description separately.
     Pass this chat's conversation_id from get_panel (or the host thread ID). Missing IDs stay unassigned.
     Pure connectivity/OK-only checks use task_kind=connectivity, mode=review and omit model.
+    Omit timeout_seconds to use the saved task timeout. Explicit values override it for this task.
     This fixes complexity to simple; actual debugging/review work uses task_kind=general.
     A model override requires model_override_reason quoting this task's explicit user model request.
     A provider name, saved default, previous task or "these three models" is not such a request.
@@ -448,8 +477,9 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
         raise common.RelayError("project_dir 必须是存在的绝对路径。")
     if mode not in ("review", "edit") or workspace_mode not in ("worktree", "direct"):
         raise common.RelayError("任务模式或工作区模式无效。")
-    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or not 10 <= timeout_seconds <= 1800:
-        raise common.RelayError("timeout_seconds 必须为 10 到 1800 之间的整数。")
+    task_preferences = app_settings.values()
+    timeout_seconds = task_preferences["task_timeout_seconds"] if timeout_seconds is None else timeout_seconds
+    app_settings.validate({"task_timeout_seconds": timeout_seconds})
     if task_complexity is not None and (not isinstance(task_complexity, str) or task_complexity not in model_selection.COMPLEXITIES):
         raise common.RelayError("task_complexity 必须为 simple、standard 或 complex。")
     if title is not None and (not isinstance(title, str) or len(title) > 80):
@@ -472,8 +502,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
         raise common.RelayError("规则决策与显式 model 不能同时提供。")
     if model is None and routing.policy()["enabled"] and routing_decision is None:
         raise common.RelayError("跨代理规则已开启，请先调用 get_routing_context 和 preview_routing，再提交 routing_decision。")
-    if sum(job["status"] == "running" for job in JOBS.values()) >= 2:
-        raise common.RelayError("已有两个任务运行中，请等待完成或取消其中一个。")
+    require_task_capacity()
     if routing_decision is not None:
         backend, profile, key, selection = await routing.resolve(routing_decision, {
             "task": task, "project_dir": str(project.resolve()), "mode": mode,
@@ -487,8 +516,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
                 raise common.RelayError("模型 ID 无效。")
             profile = common.validate_profile(settings["base_url"], selected, backend, settings["effort"])
             key = common.load_key(backend)
-        if sum(job["status"] == "running" for job in JOBS.values()) >= 2:
-            raise common.RelayError("已有两个任务运行中，请等待完成或取消其中一个。")
+        require_task_capacity()
         selection = {"model": profile["model"], "mode": "explicit" if model is not None else "default",
                      "default_model": settings["model"],
                      "reason": "本次明确指定模型。" if model is not None else "自动选型已关闭，使用保存的默认模型。"}
@@ -509,10 +537,8 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
                 selection = model_selection.choose_model(models, backend, profile["model"], task_complexity)
             profile["model"] = selection["model"]
             # Model discovery yields the event loop, so recheck the running-job limit.
-            if sum(job["status"] == "running" for job in JOBS.values()) >= 2:
-                raise common.RelayError("已有两个任务运行中，请等待完成或取消其中一个。")
-    if sum(job["status"] == "running" for job in JOBS.values()) >= 2:
-        raise common.RelayError("已有两个任务运行中，请等待完成或取消其中一个。")
+            require_task_capacity()
+    require_task_capacity()
     if len(JOBS) >= 50:
         for job_id, old in list(JOBS.items()):
             if old["status"] != "running":
@@ -523,32 +549,37 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
     panel = ensure_panel()
     description = common.redact(task, key)
     short_title = " ".join(title.split()) if title else ""
+    profile["runtime_settings"] = {name: task_preferences[name] for name in app_settings.TASK_KEYS}
     job = {"job_id": job_id, "conversation_id": conversation_id, "status": "running", "backend": backend, "runtime": common.PROVIDERS[backend]["runtime"],
            "model": profile["model"], "mode": mode, "project_dir": str(project.resolve()), "started_at": now(),
            "model_selection": selection, "task_kind": task_kind,
+           "runtime_settings": profile["runtime_settings"].copy(), "timeout_seconds": timeout_seconds,
            "title": common.redact(short_title, key) if short_title else (
                "原生 SDK 连通性检测" if task_kind == "connectivity" else progress.task_title(description, mode, str(project))),
            "task_description": description,
            "_pid": os.getpid(), "_control_url": panel.url}
-    JOBS[job_id] = job
     progress.save_job(job)
     # Profile and key are immutable per job and never included in persisted job metadata.
     job["future"] = asyncio.create_task(execute(job, task, timeout_seconds, profile.copy(), key, workspace_mode))
+    JOBS[job_id] = job
     return {name: value for name, value in job.items() if name not in ("future", "task_description") and not name.startswith("_")} | {
         "dashboard_url": panel.register_context(conversation_id, str(project.resolve())) if conversation_id else panel.url}
 
 
 @mcp.tool(annotations=READ)
-async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars: int = 20000,
+async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars: int | None = None,
                   include_description: bool = True) -> dict:
     """Read status, full task description and paginated result; optionally wait up to 20 seconds.
 
     Use include_description=false for result paging/status polling. Legacy description prefixes
     are marked task_description_complete=false; their lost text cannot be recovered here.
+    Omit max_chars to use the saved result page size.
     """
-    job = JOBS.get(job_id) or progress.load_job(job_id)
+    job = JOBS.get(job_id) or progress.load_job(job_id, load_external_result=False)
     if job is None:
         raise common.RelayError("任务不存在。")
+    if max_chars is None:
+        max_chars = app_settings.values()["result_page_chars"]
     if (any(isinstance(value, bool) or not isinstance(value, int) for value in (wait_seconds, offset, max_chars))
             or not 0 <= wait_seconds <= 20 or offset < 0 or not 100 <= max_chars <= 50000
             or not isinstance(include_description, bool)):
@@ -562,17 +593,18 @@ async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars
     if include_description:
         result.update(task_description=job.get("task_description", job.get("title", "")),
                       task_description_complete="task_description" in job)
-    if "result" in job:
-        full = job["result"]
-        result.update(result=full[offset:offset + max_chars], offset=offset, total_chars=len(full),
-                      next_offset=offset + max_chars if offset + max_chars < len(full) else None)
+    if "result" in job or "_result_file" in job:
+        total = progress.result_chars(job)
+        page = await asyncio.to_thread(progress.read_result, job, offset, max_chars)
+        result.update(result=page, offset=offset, total_chars=total,
+                      next_offset=offset + max_chars if offset + max_chars < total else None)
     return result
 
 
 @mcp.tool(annotations=READ)
 async def get_changes(job_id: str) -> dict:
     """Read a job's working diff and untracked file names. Does not commit or merge anything."""
-    job = JOBS.get(job_id) or progress.load_job(job_id)
+    job = JOBS.get(job_id) or progress.load_job(job_id, load_external_result=False)
     if not job or not job.get("workspace"):
         raise common.RelayError("任务工作区尚未就绪。")
     return await asyncio.to_thread(workspaces.changes, job["workspace"])
@@ -582,7 +614,7 @@ async def get_changes(job_id: str) -> dict:
 async def cancel_job(job_id: str) -> dict:
     """Cancel a delegated job and terminate its native worker process tree; keep worktree edits."""
     if job_id not in JOBS:
-        saved = progress.load_job(job_id)
+        saved = progress.load_job(job_id, load_external_result=False)
         if saved is None:
             raise common.RelayError("任务不存在。")
         if saved.get("status") != "running":
@@ -608,13 +640,17 @@ async def cancel_job(job_id: str) -> dict:
     return {"job_id": job_id, "status": job["status"]}
 
 
-async def run_panel(project_dir: str = "", open_browser: bool = True):
-    existing = await asyncio.to_thread(dashboard.existing_panel)
+async def run_panel(project_dir: str = "", open_browser: bool = True, *, new_instance: bool = False):
+    existing = None if new_instance else await asyncio.to_thread(dashboard.existing_panel)
     if existing:
+        try:
+            info = await asyncio.to_thread(dashboard.local_request, existing + "api/panel", {"project_dir": project_dir})
+        except (OSError, ValueError, common.RelayError):
+            raise common.RelayError("无法在已有服务中打开项目面板。请确认项目目录有效，并重启旧版面板服务后重试。") from None
         if open_browser:
-            webbrowser.open(existing)
+            webbrowser.open(info["url"])
         elif sys.stdout is not None:
-            print(json.dumps({"url": existing}), flush=True)
+            print(json.dumps(info), flush=True)
         return
     async with lifespan(mcp):
         info = await get_panel(project_dir)
@@ -629,9 +665,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--panel", action="store_true", help="Run the local web panel")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--new-instance", action="store_true", help="Start a fresh panel process instead of reusing a service")
     parser.add_argument("--project-dir", default="")
     args = parser.parse_args()
     if args.panel:
-        asyncio.run(run_panel(args.project_dir, not args.no_browser))
+        asyncio.run(run_panel(args.project_dir, not args.no_browser, new_instance=args.new_instance))
     else:
         mcp.run(transport="stdio")

@@ -8,10 +8,12 @@ import json
 from pathlib import Path
 import secrets
 import threading
+import time
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler
 
 import common
+import app_settings
 
 
 class PanelServer:
@@ -20,6 +22,7 @@ class PanelServer:
         self.loop = loop
         self.html = (html_path or common.APP_DIR / "dashboard.html").read_bytes()
         self.script = (common.APP_DIR / "dashboard.js").read_bytes()
+        self.markdown = (common.APP_DIR / "vendor" / "markdown-it.min.js").read_bytes()
         self.token = secrets.token_urlsafe(32)
         self.contexts: dict[str, dict] = {}
         panel = self
@@ -27,6 +30,30 @@ class PanelServer:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_args):
                 pass  # Never put a local access token or configuration into HTTP logs.
+
+            def discard_body(self):
+                # An unread POST body can turn an early error into a connection reset
+                # on Windows. Drain after replying, with bounded time and bytes.
+                try:
+                    remaining = min(max(int(self.headers.get("Content-Length", "0")), 0), 2 * 1024 * 1024)
+                except ValueError:
+                    return
+                deadline = time.monotonic() + 0.25
+                previous_timeout = self.connection.gettimeout()
+                try:
+                    while remaining:
+                        timeout = deadline - time.monotonic()
+                        if timeout <= 0:
+                            break
+                        self.connection.settimeout(timeout)
+                        chunk = self.rfile.read1(min(remaining, 65536))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except OSError:
+                    pass
+                finally:
+                    self.connection.settimeout(previous_timeout)
 
             def reply(self, status, body, content_type="application/json; charset=utf-8"):
                 if isinstance(body, dict):
@@ -43,8 +70,11 @@ class PanelServer:
                     self.wfile.write(body)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
+                if status >= 400 and self.command == "POST" and not self.body_read:
+                    self.discard_body()
 
             def route(self, method):
+                self.body_read = False
                 if self.headers.get("Host") != panel.host:
                     self.reply(403, {"error": "仅允许本机面板访问。"})
                     return
@@ -68,15 +98,18 @@ class PanelServer:
                 if method == "GET" and action == "dashboard.js":
                     self.reply(200, panel.script, "text/javascript; charset=utf-8")
                     return
+                if method == "GET" and action == "vendor/markdown-it.min.js":
+                    self.reply(200, panel.markdown, "text/javascript; charset=utf-8")
+                    return
                 if method == "GET" and action == "api/health":
                     self.reply(200, {"ok": True, "application": "native-agent-hub"})
                     return
-                allowed = {"GET": {"api/jobs", "api/config", "api/storage", "api/archive-policy", "api/routing"},
+                allowed = {"GET": {"api/jobs", "api/config", "api/storage", "api/archive-policy", "api/routing", "api/app-settings"},
                            "POST": {"api/models", "api/config", "api/test", "api/tasks", "api/cancel", "api/changes", "api/job",
                                     "api/jobs", "api/archive", "api/archive-policy", "api/archive-preview", "api/archive-bulk",
                                     "api/storage-policy", "api/storage-preview", "api/storage-cleanup",
                                     "api/local-detect", "api/local-sync", "api/routing", "api/routing-catalog",
-                                    "api/routing-context", "api/routing-preview"}}
+                                    "api/routing-context", "api/routing-preview", "api/panel", "api/app-settings"}}
                 if action not in allowed.get(method, set()):
                     self.reply(404, {"error": "接口不存在。"})
                     return
@@ -97,7 +130,9 @@ class PanelServer:
                         if not 0 < length <= limit:
                             self.reply(413, {"error": "请求大小超出范围。"})
                             return
-                        payload = json.loads(self.rfile.read(length))
+                        raw = self.rfile.read(length)
+                        self.body_read = True
+                        payload = json.loads(raw)
                         if not isinstance(payload, dict):
                             raise ValueError()
                     except (ValueError, UnicodeError):
@@ -106,7 +141,7 @@ class PanelServer:
                 payload["_panel_context"] = dict(context)
                 future = asyncio.run_coroutine_threadsafe(panel.dispatch(method, action[4:], payload), panel.loop)
                 try:
-                    value = future.result(timeout=150)
+                    value = future.result(timeout=app_settings.operation_timeout())
                     self.reply(200, value)
                 except FutureTimeout:
                     future.cancel()

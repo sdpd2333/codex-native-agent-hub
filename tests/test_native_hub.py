@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
 import common
+import app_settings
 from events import EventWriter, read_activity
 import progress
 import server
@@ -40,6 +41,18 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(common.load_settings(backend)['model'], backend + '-exact-ID')
         public = json.dumps(server.get_configuration())
         self.assertNotIn('fixture-', public)
+
+    def test_concurrent_capacity_configuration_is_bounded_and_defaults_to_two(self):
+        with patch.dict(os.environ):
+            os.environ.pop('AGENT_HUB_MAX_CONCURRENT_TASKS', None)
+            self.assertEqual(server.max_concurrent_tasks(), 2)
+            for value in ('1', '3', '8'):
+                os.environ['AGENT_HUB_MAX_CONCURRENT_TASKS'] = value
+                self.assertEqual(server.get_configuration()['max_concurrent_tasks'], int(value))
+            for value in ('', '0', '9', '-1', '3.5', 'invalid'):
+                os.environ['AGENT_HUB_MAX_CONCURRENT_TASKS'] = value
+                with self.assertRaises(common.RelayError):
+                    server.max_concurrent_tasks()
 
     def test_no_reuse_between_providers_or_changed_origins(self):
         common.save_settings('https://one.example.com', 'gemini-exact')
@@ -127,7 +140,8 @@ class JobIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['task_description'], description)
         self.assertEqual(progress.load_job(job['job_id'])['task_description'], description)
         self.assertEqual(payloads[0]['task'], description)
-        self.assertEqual(payloads[0]['profile'], {'base_url': 'https://original.example.com', 'model': 'original-model', 'effort': 'high'})
+        self.assertEqual(payloads[0]['profile'], {'base_url': 'https://original.example.com', 'model': 'original-model', 'effort': 'high',
+                                                'runtime_settings': app_settings.task_values()})
         self.assertEqual(payloads[0]['key'], 'original-fixture')
         self.assertNotIn('original-fixture', str(commands))
         self.assertNotIn('original-fixture', (progress.job_dir(job['job_id']) / 'job.json').read_text(encoding='utf-8'))
@@ -153,6 +167,21 @@ class JobIsolationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'timed_out')
         stop.assert_awaited_once()
         self.assertEqual(progress.load_job(job['job_id'])['status'], 'timed_out')
+
+    async def test_failed_initial_record_write_does_not_reserve_a_task_slot(self):
+        with patch.object(progress, 'save_job', side_effect=PermissionError('fixture write failure')):
+            for _ in range(2):
+                with self.assertRaises(PermissionError):
+                    await server.submit_task('review', str(APP), backend='claude')
+                self.assertFalse(server.JOBS)
+
+        async def finish(job, *_args):
+            job.update(status='completed', result='OK')
+            progress.save_job(job)
+
+        with patch.object(server, 'execute', new=finish):
+            job = await server.submit_task('review', str(APP), backend='claude')
+            self.assertEqual((await server.get_job(job['job_id'], wait_seconds=1))['status'], 'completed')
 
     async def test_claude_denies_write_and_paths_outside_review_workspace(self):
         root = Path(self.temp.name)

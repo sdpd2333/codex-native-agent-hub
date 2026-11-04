@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import redirect_stdout
+from http.client import HTTPResponse
+import io
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler
 
 APP = Path(__file__).resolve().parents[1]
@@ -119,6 +124,14 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertIn("javascript", headers["Content-Type"])
         self.assertIn(b"use strict", script)
+        for url in (self.url, self.info["url"]):
+            status, markdown, headers = await self.request(url=url + "vendor/markdown-it.min.js")
+            self.assertEqual(status, 200)
+            self.assertIn("javascript", headers["Content-Type"])
+            self.assertEqual(markdown, (APP / "vendor" / "markdown-it.min.js").read_bytes())
+        self.assertEqual((await self.request(url="http://" + server.PANEL.host + "/wrong/vendor/markdown-it.min.js"))[0], 404)
+        self.assertEqual((await self.request("vendor/markdown-it.min.js", headers={"Host": "untrusted.invalid"}))[0], 403)
+        self.assertEqual((await self.request("vendor/../common.py"))[0], 404)
         status, body, _ = await self.request("api/config")
         config = json.loads(body)
         self.assertFalse(config["ready"])
@@ -135,6 +148,108 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await self.request("api/config", "POST", {}, extra))[0], expected)
         self.assertEqual((await self.request("api/tasks"))[0], 404)
         self.assertEqual((await self.request("api/config", "POST", []))[0], 400)
+
+    async def test_reusing_a_service_keeps_the_requested_project_context(self):
+        panel = server.PANEL
+        original = dict(panel.contexts)
+        with patch.object(server.webbrowser, "open") as opened:
+            await server.run_panel(self.temp.name)
+        url = opened.call_args.args[0]
+        self.assertIn("/views/", url)
+        self.assertIs(server.PANEL, panel)
+        self.assertTrue(all(panel.contexts[token] == value for token, value in original.items()))
+        status, body, _ = await self.request(url=url + "api/config")
+        self.assertEqual(status, 200)
+        config = json.loads(body)
+        self.assertEqual(config["default_project_dir"], str(Path(self.temp.name).resolve()))
+        self.assertTrue(config["panel_context"]["conversation_id"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            await server.run_panel(str(APP), open_browser=False)
+        info = json.loads(output.getvalue())
+        self.assertTrue(info["conversation_id"])
+        _, body, _ = await self.request(url=info["url"] + "api/config")
+        self.assertEqual(json.loads(body)["default_project_dir"], str(APP))
+
+    async def test_panel_context_registration_validates_project_and_request_origin(self):
+        payload = {"project_dir": str(APP), "conversation_id": "launcher-chat"}
+        self.assertEqual((await self.request("api/panel", "POST", payload,
+                                           {"Origin": "https://untrusted.invalid"}))[0], 403)
+        self.assertEqual((await self.request("api/panel", "POST", payload, {"X-Agent-Hub": ""}))[0], 403)
+        self.assertEqual((await self.request("api/panel"))[0], 404)
+        self.assertEqual((await self.request("api/panel", "POST", {"project_dir": "relative/path"}))[0], 400)
+        _, first, _ = await self.request("api/panel", "POST", payload)
+        _, second, _ = await self.request("api/panel", "POST", payload)
+        self.assertEqual(json.loads(first)["url"], json.loads(second)["url"])
+
+    async def test_rejected_posts_return_errors_before_draining_untrusted_bodies(self):
+        target = urlsplit(self.url + "api/panel")
+        body = b'{"project_dir":"unused","conversation_id":"never-registered"}'
+        contexts = dict(server.PANEL.contexts)
+
+        def call(content_type, origin, expected, send_body):
+            with socket.create_connection((target.hostname, target.port), timeout=2) as connection:
+                headers = (
+                    f"POST {target.path} HTTP/1.0\r\nHost: {target.netloc}\r\n"
+                    f"Content-Type: {content_type}\r\nX-Agent-Hub: 1\r\n"
+                    f"Origin: {origin}\r\nContent-Length: {len(body)}\r\n\r\n"
+                )
+                connection.sendall(headers.encode("ascii"))
+                with HTTPResponse(connection) as response:
+                    response.begin()
+                    self.assertEqual(response.status, expected)
+                    # The response must arrive before a delayed or missing request body.
+                    if send_body:
+                        connection.sendall(body)
+                    self.assertIn("error", json.loads(response.read()))
+                # Closure is graceful and bounded even when the body never arrives.
+                self.assertEqual(connection.recv(1), b"")
+
+        for content_type, origin, expected in (
+            ("application/json", "https://untrusted.invalid", 403),
+            ("text/plain", "http://" + target.netloc, 415),
+        ):
+            for send_body in (True, False):
+                with self.subTest(status=expected, send_body=send_body):
+                    await asyncio.to_thread(call, content_type, origin, expected, send_body)
+        self.assertEqual(server.PANEL.contexts, contexts)
+
+    async def test_rejected_posts_with_bodies_reliably_return_status(self):
+        for attempt in range(24):
+            with self.subTest(attempt=attempt):
+                status, body, _ = await self.request(
+                    "api/panel", "POST", {"project_dir": str(APP), "conversation_id": "rejected"},
+                    {"Origin": "https://untrusted.invalid"})
+                self.assertEqual(status, 403)
+                self.assertIn("error", json.loads(body))
+
+    async def test_fresh_dev_panel_does_not_reuse_the_old_process(self):
+        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        environment = dict(os.environ, AGENT_HUB_STATE_DIR=self.temp.name, AGENT_HUB_MAX_CONCURRENT_TASKS="3")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-B", str(APP / "server.py"), "--panel", "--no-browser", "--new-instance",
+            "--project-dir", str(APP), cwd=str(APP), env=environment,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, **options)
+        try:
+            info = json.loads(await asyncio.wait_for(process.stdout.readline(), 15))
+            self.assertNotEqual(info["url"].split("/views/")[0], self.url.rstrip("/"))
+            config = await asyncio.to_thread(dashboard.local_request, info["url"] + "api/config")
+            self.assertEqual(config["max_concurrent_tasks"], 3)
+            self.assertEqual(config["default_project_dir"], str(APP))
+            self.assertTrue(config["panel_context"]["conversation_id"])
+            self.assertEqual((await self.request("api/health"))[0], 200)
+        finally:
+            await server.stop_process(process)
+            await process.communicate()
+
+    async def test_older_service_does_not_silently_open_an_unscoped_panel(self):
+        with patch.object(server.dashboard, "existing_panel", return_value=self.url), \
+             patch.object(server.dashboard, "local_request", side_effect=OSError("unsupported endpoint")), \
+             patch.object(server.webbrowser, "open") as opened:
+            with self.assertRaisesRegex(common.RelayError, "旧版面板服务"):
+                await server.run_panel(str(APP))
+        opened.assert_not_called()
 
     async def test_configuration_round_trip_and_saved_key_is_not_returned(self):
         key = "panel-fixture-credential"
@@ -293,7 +408,7 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
             pieces.append(page["result"])
             offset = page["next_offset"]
         self.assertEqual("".join(pieces), full)
-        for invalid in ({"offset": True}, {"offset": -1}, {"offset": "0"}, {"max_chars": None}, {"max_chars": 50001}):
+        for invalid in ({"offset": True}, {"offset": -1}, {"offset": "0"}, {"max_chars": "20000"}, {"max_chars": 50001}):
             self.assertEqual((await self.request("api/job", "POST", {"job_id": job["job_id"], **invalid}))[0], 400)
 
     async def test_short_title_and_full_redacted_description_survive_restart_without_bloating_polling(self):

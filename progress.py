@@ -5,6 +5,7 @@ from collections import deque
 from datetime import datetime, timezone
 import ctypes
 from ctypes import wintypes
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,11 +13,13 @@ import re
 import threading
 
 import common
+import app_settings
 from events import read_activity
 
 JOB_ID = re.compile(r"[0-9a-f]{16}\Z")
+RESULT_FILE = re.compile(r"result-[0-9a-f]{64}\.txt\Z")
 PUBLIC_FIELDS = ("job_id", "title", "task_description", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "status", "started_at",
-                 "finished_at", "result", "error", "_pid", "_control_url")
+                 "finished_at", "result", "error", "_pid", "_control_url", "_result_file", "_result_chars")
 TOOL_LABELS = {
     "view_file": "读取文件", "list_dir": "浏览目录", "search_dir": "搜索目录",
     "find_file": "查找文件", "find": "查找文件", "grep_search": "搜索代码",
@@ -57,21 +60,61 @@ def job_dir(job_id: str) -> Path:
 
 def save_job(job: dict) -> None:
     data = {key: job[key] for key in PUBLIC_FIELDS if key in job}
+    if "result" in data:
+        result = data.pop("result")
+        encoded = result.encode("utf-8")
+        # Publish the complete result before its metadata. A failed metadata write
+        # leaves the previous result intact, including when a result is replaced.
+        data["_result_file"] = "result-" + hashlib.sha256(encoded).hexdigest() + ".txt"
+        data["_result_chars"] = len(result)
+        common._atomic_write(job_dir(job["job_id"]) / data["_result_file"], encoded)
     common._atomic_write(job_dir(job["job_id"]) / "job.json",
                          json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
 
-def load_job(job_id: str) -> dict | None:
+def load_job(job_id: str, *, load_external_result: bool = True) -> dict | None:
+    """Read old inline records too; list/paging callers can defer external result I/O."""
     path = job_dir(job_id) / "job.json"
     try:
-        if path.stat().st_size > 2 * 1024 * 1024:
-            return None
-        data = json.loads(path.read_text(encoding="utf-8"))
+        with path.open(encoding="utf-8") as stream:
+            data = json.load(stream)
         if not isinstance(data, dict) or data.get("job_id") != job_id:
             return None
-        return {key: data[key] for key in PUBLIC_FIELDS if key in data}
+        data = {key: data[key] for key in PUBLIC_FIELDS if key in data}
     except (OSError, ValueError):
         return None
+    if load_external_result and "result" not in data and "_result_file" in data:
+        data["result"] = read_result(data)
+    return data
+
+
+def result_chars(job: dict) -> int:
+    return len(job["result"]) if "result" in job else job.get("_result_chars", 0)
+
+
+def read_result(job: dict, offset: int = 0, max_chars: int | None = None) -> str:
+    if "result" in job:
+        return job["result"][offset:None if max_chars is None else offset + max_chars]
+    name = job.get("_result_file", "")
+    if not isinstance(name, str) or not RESULT_FILE.fullmatch(name):
+        raise common.RelayError("任务结果文件引用无效。")
+    try:
+        # Text offsets are Unicode characters. Skip bounded chunks instead of
+        # loading a large result in full for every page; preserve CRLF verbatim.
+        with (job_dir(job["job_id"]) / name).open(encoding="utf-8", newline="") as stream:
+            remaining = offset
+            while remaining:
+                skipped = stream.read(min(remaining, 65536))
+                if not skipped:
+                    break
+                remaining -= len(skipped)
+            result = stream.read() if max_chars is None else stream.read(max_chars)
+        expected = max(0, result_chars(job) - offset)
+        if len(result) != (expected if max_chars is None else min(expected, max_chars)):
+            raise common.RelayError("任务结果文件不完整，请检查本地任务数据。")
+        return result
+    except (OSError, UnicodeError):
+        raise common.RelayError("任务结果文件无法读取，请检查本地任务数据。") from None
 
 
 def load_management(job_id: str) -> dict:
@@ -147,11 +190,12 @@ class TranscriptTracker:
         self.models: set = set()
         self.tools: dict = {}
         self.seen: set = set()
-        self.events = deque(maxlen=30)
+        # Keep enough events to increase the visible count without rereading a live log.
+        self.events = deque(maxlen=app_settings.SCHEMA["activity_event_limit"]["max"])
         self.phase = "正在启动 Antigravity"
         self.last_activity_at = None
 
-    def update(self, directory: Path) -> dict:
+    def update(self, directory: Path, *, complete: bool = False) -> dict:
         try:
             # The SDK stores its live JSONL under app_data_dir; save_dir may
             # contain only a session database. Keep the older layout supported.
@@ -165,28 +209,39 @@ class TranscriptTracker:
                     self.path = path
                 with path.open("rb") as stream:
                     stream.seek(self.offset)
-                    chunk = stream.read(2 * 1024 * 1024)
-                    self.offset = stream.tell()
-                pieces = (self.pending + chunk).split(b"\n")
-                self.pending = pieces.pop()
-                for line in pieces:
-                    if self.dropping:
-                        self.dropping = False
-                        continue
-                    if len(line) > 1024 * 1024:
-                        continue
-                    try:
-                        self.accept(json.loads(line))
-                    except (ValueError, TypeError, AttributeError):
-                        continue
-                if len(self.pending) > 1024 * 1024:
-                    self.pending = b""
-                    self.dropping = True
+                    end = size if complete else min(size, self.offset + 2 * 1024 * 1024)
+                    while self.offset < end:
+                        chunk = stream.read(min(2 * 1024 * 1024, end - self.offset))
+                        if not chunk:
+                            raise OSError("transcript changed while reading")
+                        self.offset = stream.tell()
+                        self.consume(chunk)
+                    if complete and self.pending:
+                        self.consume(b"\n")  # A valid final JSON row need not end with a newline.
         except OSError:
+            if complete:
+                raise  # Cleanup must preserve logs when the final summary cannot be read.
             pass  # A transcript may be rotating or not yet created.
         return {"phase": self.phase, "model_calls": len(self.models),
-                "tool_calls": sum(self.tools.values()), "budget_model_calls": 40,
+                "tool_calls": sum(self.tools.values()),
                 "last_activity_at": self.last_activity_at, "events": list(self.events)}
+
+    def consume(self, chunk: bytes) -> None:
+        pieces = (self.pending + chunk).split(b"\n")
+        self.pending = pieces.pop()
+        for line in pieces:
+            if self.dropping:
+                self.dropping = False
+                continue
+            if len(line) > 1024 * 1024:
+                continue
+            try:
+                self.accept(json.loads(line))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        if len(self.pending) > 1024 * 1024:
+            self.pending = b""
+            self.dropping = True
 
     def accept(self, row: dict) -> None:
         kind = str(row.get("type", "")).lower()
@@ -221,13 +276,14 @@ _trackers: dict[str, TranscriptTracker] = {}
 _tracker_lock = threading.RLock()
 
 
-def snapshot(job: dict, *, include_result: bool = True) -> dict:
+def snapshot(job: dict, *, include_result: bool = True, complete_activity: bool = False) -> dict:
     with _tracker_lock:
-        return _snapshot(job, include_result=include_result)
+        return _snapshot(job, include_result=include_result, complete_activity=complete_activity)
 
 
-def _snapshot(job: dict, *, include_result: bool = True) -> dict:
+def _snapshot(job: dict, *, include_result: bool = True, complete_activity: bool = False) -> dict:
     job_id = job["job_id"]
+    preferences = app_settings.values()
     management = load_management(job_id)
     if job_id not in _trackers:
         if len(_trackers) >= 60:
@@ -235,13 +291,18 @@ def _snapshot(job: dict, *, include_result: bool = True) -> dict:
         _trackers[job_id] = TranscriptTracker()
     activity = management.get("activity_summary") if management.get("logs_cleaned_at") else None
     if not isinstance(activity, dict):
-        activity = (_trackers[job_id].update(job_dir(job_id)) if job.get("backend", "gemini") == "gemini"
-                    else read_activity(job_dir(job_id) / "activity.jsonl"))
+        activity = (_trackers[job_id].update(job_dir(job_id), complete=complete_activity) if job.get("backend", "gemini") == "gemini"
+                    else read_activity(job_dir(job_id) / "activity.jsonl", preferences["activity_event_limit"]))
     activity = dict(activity)
+    # Legacy jobs were launched with the original budgets, not today's preferences.
+    limits = job.get("runtime_settings") or app_settings.DEFAULTS
+    activity["budget_model_calls"] = limits["max_model_calls"]
+    activity["budget_tool_calls"] = limits["max_tool_calls"]
+    activity["events"] = activity.get("events", [])[-preferences["activity_event_limit"]:]
     status = effective_status(job)
     if status != "running":
         activity["phase"] = FINAL_LABELS.get(status, status)
-    data = {key: job[key] for key in ("job_id", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error")
+    data = {key: job[key] for key in ("job_id", "task_kind", "conversation_id", "backend", "runtime", "model", "model_selection", "mode", "project_dir", "workspace", "started_at", "finished_at", "error", "runtime_settings", "timeout_seconds")
             if key in job}
     data.update(title=job.get("_display_title") or display_title(job), status=status, project_name=Path(job.get("project_dir", "")).name,
                 progress=activity, can_cancel=status == "running" and bool(job.get("_control_url")),
@@ -249,10 +310,9 @@ def _snapshot(job: dict, *, include_result: bool = True) -> dict:
                 archive_reason=management.get("archive_reason"), restored_at=management.get("restored_at"),
                 auto_archive_exempt=bool(management.get("auto_archive_exempt")),
                 logs_cleaned_at=management.get("logs_cleaned_at"))
-    text = str(job.get("result", ""))
-    data["result_chars"] = job.get("_result_chars", len(text))
-    if include_result and "result" in job:
-        data.update(result=text[:50000], result_truncated=len(text) > 50000)
+    data["result_chars"] = result_chars(job)
+    if include_result and ("result" in job or "_result_file" in job):
+        data.update(result=read_result(job, max_chars=50000), result_truncated=data["result_chars"] > 50000)
     return data
 
 
@@ -266,7 +326,7 @@ def list_jobs(*, include_result: bool = True) -> list[dict]:
     for path in paths:
         if not JOB_ID.fullmatch(path.parent.name):
             continue
-        data = load_job(path.parent.name)
+        data = load_job(path.parent.name, load_external_result=False)
         if data:
             jobs.append(snapshot(data, include_result=include_result))
         if len(jobs) >= 50:

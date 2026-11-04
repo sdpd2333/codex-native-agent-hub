@@ -372,23 +372,29 @@ class AutomaticSelectionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_parallel_catalog_requests_cannot_overbook_task_limit(self):
         self.enable()
-        ready = threading.Barrier(3)
-        release = asyncio.Event()
+        for limit in (2, 3):
+            with self.subTest(limit=limit), patch.dict(os.environ, {'AGENT_HUB_MAX_CONCURRENT_TASKS': str(limit)}):
+                server.JOBS.clear()
+                ready = threading.Barrier(limit + 1)
+                release = asyncio.Event()
 
-        def fetch(*_args):
-            ready.wait(timeout=5)
-            return ['gemini-3.8-flash']
+                def fetch(*_args):
+                    ready.wait(timeout=5)
+                    return ['gemini-3.8-flash']
 
-        async def hold(*_args):
-            await release.wait()
+                async def hold(job, *_args):
+                    await release.wait()
+                    job['status'] = 'completed'
 
-        with patch.object(common, 'fetch_models', side_effect=fetch), patch.object(server, 'execute', new=hold):
-            results = await asyncio.gather(*(server.submit_task('review', str(APP), task_complexity='simple')
-                                            for _ in range(3)), return_exceptions=True)
-            self.assertEqual(sum(isinstance(item, dict) for item in results), 2)
-            self.assertEqual(sum(isinstance(item, common.RelayError) for item in results), 1)
-            release.set()
-            await asyncio.gather(*(job['future'] for job in server.JOBS.values()))
+                with patch.object(common, 'fetch_models', side_effect=fetch), patch.object(server, 'execute', new=hold):
+                    results = await asyncio.gather(*(server.submit_task('review', str(APP), task_complexity='simple')
+                                                    for _ in range(limit + 1)), return_exceptions=True)
+                    self.assertEqual(sum(isinstance(item, dict) for item in results), limit)
+                    self.assertEqual(sum(isinstance(item, common.RelayError) for item in results), 1)
+                    self.assertEqual(sum(job['status'] == 'running' for job in server.JOBS.values()), limit)
+                    release.set()
+                    await asyncio.gather(*(job['future'] for job in server.JOBS.values()))
+                    server.require_task_capacity()
 
 
 if __name__ == '__main__':

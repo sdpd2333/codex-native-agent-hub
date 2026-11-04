@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { chromium } = require("playwright-core");
 const axe = require("axe-core");
-const { html, script, fixture, job } = require("./dashboard-fixture.cjs");
+const { html, script, markdownScript, markdownResult, fixture, job } = require("./dashboard-fixture.cjs");
 
 async function main() {
   const state = fixture(),
@@ -15,6 +15,8 @@ async function main() {
     "审查前端交互与可访问性，检查标题完整换行以及任务描述独立展示。".repeat(2);
   state.descriptions[state.jobs[0].job_id].text =
     "完整任务描述\n" + "长路径/".repeat(75) + "\n描述尾部应完整可见。";
+  state.results[state.jobs[0].job_id] = markdownResult + state.results[state.jobs[0].job_id];
+  state.jobs[0].result_chars = Array.from(state.results[state.jobs[0].job_id]).length;
   const output = path.resolve("outputs/validation");
   fs.mkdirSync(output, { recursive: true });
   const app = http.createServer(async (request, response) => {
@@ -31,6 +33,11 @@ async function main() {
     if (request.url === "/fixture/dashboard.js") {
       response.setHeader("Content-Type", "text/javascript; charset=utf-8");
       response.end(script);
+      return;
+    }
+    if (request.url === "/fixture/vendor/markdown-it.min.js") {
+      response.setHeader("Content-Type", "text/javascript; charset=utf-8");
+      response.end(markdownScript);
       return;
     }
     response.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -69,6 +76,9 @@ async function main() {
       () => document.querySelector(".result").textContent.length > 0,
     );
     await page.locator("#pause").click();
+    assert.equal(await page.locator(".result h1").textContent(), "审查结果");
+    assert.equal(await page.locator(".result table").count(), 1);
+    assert.equal(await page.locator(".result pre code").count(), 1);
     await page.locator(".task-description summary").focus();
     await page.keyboard.press("Enter");
     await page.waitForFunction(() =>
@@ -78,8 +88,23 @@ async function main() {
     );
     for (const width of [320, 375, 480, 760, 1024]) {
       await page.setViewportSize({ width, height: 900 });
-      for (const tab of ["monitor", "task", "storage", "rules", "settings"]) {
-        await page.locator(`#tab-${tab}`).click();
+      for (const tab of ["monitor", "task", "connections", "connection-local", "rules", "runtime", "interface", "storage"]) {
+        const pageTab = tab === "connection-local" ? "connections" : tab;
+        if (!["monitor", "task"].includes(tab)) await page.locator("#tab-settings").click();
+        await page.locator(`#tab-${pageTab}`).click();
+        await page.locator(`section#${pageTab}`).waitFor({ state: "visible" });
+        if (pageTab === "connections") {
+          const local = tab === "connection-local";
+          await page.locator(`#tab-connection-${local ? "local" : "manual"}`).click();
+          assert.equal(await page.locator("#base-url").isVisible(), !local);
+          assert.equal(await page.locator("#local-detect").isVisible(), local);
+          const bounds = await page.locator(".connection-tabs button").evaluateAll((buttons) => buttons.map((button) => {
+            const { top, bottom, left, right } = button.getBoundingClientRect();
+            return { top, bottom, left, right };
+          }));
+          assert.ok(Math.abs(bounds[0].top - bounds[1].top) < 1, "Connection methods share one row");
+          assert.ok(bounds[0].right <= bounds[1].left, "Connection tabs do not overlap");
+        }
         if (tab === "rules" && width === 320) {
           await page.locator("#rules-catalog").click();
           await page.waitForFunction(() =>
@@ -105,6 +130,22 @@ async function main() {
           `Overflow: ${width}px ${tab}`,
         );
         if (tab === "monitor") {
+          await page.locator("#search").focus();
+          const searchGap = await page.locator("#search").evaluate((input) => {
+            const style = getComputedStyle(input);
+            return input.getBoundingClientRect().top - document.querySelector("#context-note").getBoundingClientRect().bottom
+              - parseFloat(style.outlineWidth) - parseFloat(style.outlineOffset);
+          });
+          assert.ok(searchGap >= 6, `Search focus ring overlaps context at ${width}px`);
+          const markdownBounds = await page.locator(".result").evaluate((result) => ({
+            client: result.clientWidth,
+            scroll: result.scrollWidth,
+            codeScrolls: result.querySelector("pre").scrollWidth > result.querySelector("pre").clientWidth,
+            tableScrolls: result.querySelector(".result-table").scrollWidth > result.querySelector(".result-table").clientWidth,
+          }));
+          assert.ok(markdownBounds.scroll <= markdownBounds.client + 1, `Markdown overflow at ${width}px`);
+          assert.ok(markdownBounds.codeScrolls, "Long code scrolls inside its own block");
+          if (width <= 375) assert.ok(markdownBounds.tableScrolls, "Wide tables scroll inside their own region");
           const controls = await page.evaluate(() => {
             const segments = document
               .querySelector(".view-segments")
@@ -130,7 +171,7 @@ async function main() {
           if (width >= 480) assert.ok(Math.abs(controls.topDelta) < 1);
           else assert.ok(controls.topDelta >= 0);
           assert.equal(
-            await page.locator("#detail h2").textContent(),
+            await page.locator("#detail .detail-top h2").textContent(),
             state.jobs[0].title,
           );
           assert.equal(
@@ -138,7 +179,7 @@ async function main() {
             state.descriptions[state.jobs[0].job_id].text,
           );
           const titleStyle = await page
-            .locator("#detail h2")
+            .locator("#detail .detail-top h2")
             .evaluate((node) => ({
               clamp: getComputedStyle(node).webkitLineClamp,
               overflow: node.scrollHeight > node.clientHeight + 1,
@@ -180,7 +221,11 @@ async function main() {
             path: path.join(output, `${tab}-375.png`),
             fullPage: true,
           });
-        if (tab === "monitor") {
+        if (tab === "monitor" && [375, 1024].includes(width))
+          await page.locator(".result").locator("..").screenshot({
+            path: path.join(output, `markdown-result-${width}.png`),
+          });
+        if (tab === "storage") {
           await page.locator("#archive-settings > summary").click();
           const expanded = await page.evaluate(async () => ({
             client: document.documentElement.clientWidth,
@@ -227,8 +272,8 @@ async function main() {
       result.scrollTop = 100;
       const selection = window.getSelection(),
         range = document.createRange();
-      range.setStart(result.firstChild, 0);
-      range.setEnd(result.firstChild, 4);
+      range.setStart(result.querySelector("p").firstChild, 0);
+      range.setEnd(result.querySelector("p").firstChild, 4);
       selection.removeAllRanges();
       selection.addRange(range);
       window.retainedResult = result;
@@ -254,9 +299,14 @@ async function main() {
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     // Windows clipboard normalizes text line endings to CRLF.
     assert.ok(
-      copied.replace(/\r\n/g, "\n") === state.results[state.jobs[0].job_id],
+      copied.replace(/\r\n/g, "\n") === state.results[state.jobs[0].job_id].replace(/\r\n/g, "\n"),
       "Clipboard must include the entire Unicode result",
     );
+    await page.getByRole("button", { name: "查看原文", exact: true }).click();
+    assert.equal(await page.locator(".result").textContent(), state.results[state.jobs[0].job_id]);
+    assert.equal(await page.locator(".result h1").count(), 0);
+    await page.getByRole("button", { name: "Markdown 预览", exact: true }).click();
+    assert.equal(await page.locator(".result h1").textContent(), "审查结果");
     const events = page.locator("#detail .events");
     await events.evaluate((node) => {
       node.scrollTop = 110;
@@ -281,6 +331,21 @@ async function main() {
       await page.evaluate(() => document.activeElement.id),
       "tab-settings",
     );
+    await page.locator("#tab-runtime").click();
+    await page.locator("#pref-max_concurrent_tasks").fill("3");
+    await page.locator("#runtime-save").click();
+    await page.waitForFunction(() => document.querySelector("#runtime-alert").textContent.includes("设置已保存"));
+    assert.equal(state.config.app_settings.values.max_concurrent_tasks, 3);
+    await page.locator("#tab-runtime").focus();
+    await page.keyboard.press("ArrowRight");
+    assert.equal(await page.evaluate(() => document.activeElement.id), "tab-interface");
+    await page.locator("#pref-jobs_page_size").fill("20");
+    await page.locator("#tab-connections").click();
+    await page.locator("#tab-interface").click();
+    assert.equal(await page.locator("#pref-jobs_page_size").inputValue(), "20");
+    await page.locator("#interface-save").click();
+    await page.waitForFunction(() => document.querySelector("#interface-alert").textContent.includes("设置已保存"));
+    assert.equal(state.config.app_settings.values.jobs_page_size, 20);
     assert.equal(
       await page.locator("#task-model").getAttribute("aria-pressed"),
       null,
@@ -298,6 +363,8 @@ async function main() {
     await page.getByRole("button", { name: "清除筛选", exact: true }).click();
     await page.waitForSelector("#jobs .job");
     state.jobs.push(job("c", "completed", { conversation_id: "" }));
+    await page.locator("#tab-settings").click();
+    await page.locator("#tab-storage").click();
     await page.locator("#archive-settings > summary").focus();
     await page.keyboard.press("Enter");
     await page.locator("#archive-days").fill("14");
@@ -316,6 +383,7 @@ async function main() {
         .querySelector("#archive-bulk-alert")
         .textContent.includes("已归档 1 个"),
     );
+    await page.locator("#tab-monitor").click();
     await page.locator("#view-archived").click();
     await page.locator('#jobs [data-job-id="cccccccccccccccc"]').click();
     await page.getByText(/旧任务批量归档 ·/).waitFor();
@@ -323,7 +391,10 @@ async function main() {
     await page.locator("#view-all").click();
     await page.locator('#jobs [data-job-id="cccccccccccccccc"]').click();
     await page.getByText(/此任务已恢复，免于自动归档/).waitFor();
+    await page.locator("#tab-settings").click();
+    await page.locator("#tab-storage").click();
     await page.locator("#archive-settings > summary").click();
+    await page.locator("#tab-monitor").click();
     await page.setViewportSize({ width: 375, height: 900 });
     state.jobs = [];
     await page.locator("#refresh").click();
@@ -341,13 +412,34 @@ async function main() {
       Math.abs(emptyWidth - listWidth) < 1,
       "Empty state should span both grid columns",
     );
+    state.jobs = [job("b"), job("e", "failed"), job("f", "timed_out"),
+      job("a", "completed"), job("c", "completed"), job("d", "completed"), job("1", "completed")];
+    await page.locator("#view-current").click();
+    await page.locator(".running-group .job").waitFor();
+    await page.locator(".attention-group > summary").click();
+    await page.locator(".completed-group > summary").click();
+    const finishing = page.locator('.job[data-job-id="bbbbbbbbbbbbbbbb"]');
+    await finishing.click();
+    await finishing.focus();
+    state.jobs[0].status = "completed";
+    state.jobs[0].finished_at = "2026-11-04T14:10:00Z";
+    await page.evaluate(() => document.querySelector("#refresh").click());
+    await page.locator('.recent-completed [data-job-id="bbbbbbbbbbbbbbbb"]').waitFor();
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.jobId), "b".repeat(16));
+    assert.equal(await finishing.getAttribute("aria-pressed"), "true");
+    assert.equal(await page.locator(".attention-group").getAttribute("open"), null);
+    assert.equal(await page.locator(".completed-group").getAttribute("open"), null);
+    assert.equal(await page.locator("#jobs .job").count(), 7);
+    assert.equal(await page.locator("#jobs > :first-child").getAttribute("class"), "job-group recent-completed");
+    await page.locator("#search").focus();
+    await page.screenshot({ path: path.join(output, "recent-completed-375.png"), fullPage: true });
     assert.deepEqual(errors, []);
     console.log(
       JSON.stringify({
         browser: browser.version(),
         layouts: evidence.length,
         axeViolations: 0,
-        interactions: 14,
+        interactions: 22,
         ok: true,
       }),
     );

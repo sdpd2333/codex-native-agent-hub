@@ -1,8 +1,39 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const root = path.resolve(__dirname, "..");
+const settingsSchema = require("../settings-schema.json");
+const settingsDefaults = Object.fromEntries(Object.entries(settingsSchema).map(([name, field]) => [name, field.default]));
 const html = fs.readFileSync(path.join(root, "dashboard.html"), "utf8");
 const script = fs.readFileSync(path.join(root, "dashboard.js"), "utf8");
+const markdownScript = fs.readFileSync(path.join(root, "vendor/markdown-it.min.js"), "utf8");
+const markdownResult = [
+  "完整结果🙂",
+  "",
+  "# 审查结果",
+  "",
+  "## 已完成",
+  "",
+  "**重点**与*说明*、`inline <code>`。",
+  "",
+  "- 第一项",
+  "- 第二项",
+  "",
+  "1. 检查",
+  "2. 验证",
+  "",
+  "> 引用说明",
+  "",
+  "| 项目 | 状态 | 模型 | 调用 | 备注 |",
+  "| --- | --- | --- | --- | --- |",
+  "| " + "长路径/".repeat(30) + " | 通过 | 示例 | 2 | 已验证 |",
+  "",
+  "```js",
+  "const value = '<script>literal</script>'; // " + "long-code-".repeat(35),
+  "```",
+  "",
+  "[参考](https://example.com/guide)",
+  "",
+].join("\r\n");
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const deferred = () => {
   let resolve, reject;
@@ -73,6 +104,8 @@ function fixture() {
   );
   const state = {
     config: {
+      app_settings: { schema: clone(settingsSchema), values: clone(settingsDefaults), saved_values: clone(settingsDefaults),
+        revision: "app-r1", overrides: {} },
       profiles,
       runtimes: {},
       default_project_dir: "C:/Projects/example",
@@ -114,6 +147,16 @@ function fixture() {
   state.api = async (action, payload) => {
     state.calls.push({ action, payload: clone(payload || {}) });
     if (state.handlers[action]) return state.handlers[action](payload);
+    if (action === "app-settings") {
+      if (payload) {
+        if (payload.revision !== state.config.app_settings.revision)
+          throw Object.assign(new Error("设置已更新，请重新加载后合并修改"), { status: 409 });
+        Object.assign(state.config.app_settings.saved_values, payload.values);
+        Object.assign(state.config.app_settings.values, payload.values);
+        state.config.app_settings.revision += "-next";
+      }
+      return clone(state.config.app_settings);
+    }
     if (action === "jobs") {
       const {
         view = "current",
@@ -153,6 +196,11 @@ function fixture() {
       );
       return {
         jobs: clone(matching.slice(start, start + limit)),
+        recent_completed_ids: status === "all" && view !== "archived"
+          ? matching.filter((item) => item.status === "completed")
+            .sort((a, b) => Date.parse(b.finished_at || b.started_at) - Date.parse(a.finished_at || a.started_at))
+            .slice(0, state.config.app_settings.values.recent_completed_count).map((item) => item.job_id)
+          : [],
         total: matching.length,
         offset: start,
         next_offset: start + limit < matching.length ? start + limit : null,
@@ -412,4 +460,4 @@ function fixture() {
   };
   return state;
 }
-module.exports = { html, script, fixture, job, clone, deferred };
+module.exports = { html, script, markdownScript, markdownResult, fixture, job, clone, deferred };

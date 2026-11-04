@@ -1,6 +1,20 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
+  const markdown = window.markdownit({ html: false });
+  markdown.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+    tokens[index].attrSet("target", "_blank");
+    tokens[index].attrSet("rel", "noopener noreferrer");
+    return renderer.renderToken(tokens, index, options);
+  };
+  // Results are untrusted text. Never fetch embedded images or enable raw HTML.
+  markdown.renderer.rules.image = (tokens, index, options, env, renderer) =>
+    markdown.utils.escapeHtml(
+      `[图片：${renderer.renderInlineAsText(tokens[index].children, options, env)}]`,
+    );
+  markdown.renderer.rules.table_open = () =>
+    '<div class="result-table" role="region" aria-label="结果表格" tabindex="0"><table>\n';
+  markdown.renderer.rules.table_close = () => "</table></div>\n";
   const names = { gemini: "Gemini", claude: "Claude", deepseek: "DeepSeek" };
   const statuses = {
     running: "运行中",
@@ -28,6 +42,7 @@
     pendingForce = false,
     failures = 0;
   let activeTab = "monitor",
+    activeSettingsTab = "connections",
     configSequence = 0,
     taskBackendTouched = false,
     lastUpdated = "",
@@ -43,14 +58,31 @@
     listOffset = 0,
     listTotal = 0,
     listNext = null,
-    listLoading = false;
-  const completedGroup = document.createElement("details"),
-    completedLabel = document.createElement("summary"),
-    completedJobs = document.createElement("div");
-  completedGroup.className = "completed-group";
-  completedJobs.className = "completed-jobs";
-  completedGroup.open = true;
-  completedGroup.append(completedLabel, completedJobs);
+    listLoading = false,
+    recentCompletedIds = new Set();
+  let applicationSettings = null,
+    applicationBusy = false,
+    applicationSequence = 0,
+    taskTimeoutTouched = false;
+  const applicationDrafts = new Map();
+  function preference(name, fallback) {
+    return applicationSettings?.values[name] ?? fallback;
+  }
+  const jobGroups = Object.fromEntries([
+    ["running", "运行中", false],
+    ["recent", "最近完成", true],
+    ["attention", "需要关注", true],
+    ["completed", "已完成", true],
+  ].map(([name, label, collapsible]) => {
+    const node = el(collapsible ? "details" : "section", `job-group ${name === "recent" ? "recent-completed" : name + "-group"}`),
+      heading = el(collapsible ? "summary" : "h3"),
+      items = el("div", `job-group-items ${name}-jobs`);
+    heading.id = "job-group-" + name;
+    if (collapsible) node.open = true;
+    else node.setAttribute("aria-labelledby", heading.id);
+    node.append(heading, items);
+    return [name, { node, heading, items, label }];
+  }));
 
   function el(tag, cls, text) {
     const node = document.createElement(tag);
@@ -110,7 +142,7 @@
         "routing-context",
         "routing-catalog",
       ].includes(action)
-        ? 155000
+        ? (preference("operation_timeout_seconds", 150) + 5) * 1000
         : 30000,
     );
     try {
@@ -220,6 +252,7 @@
   function acceptConfig(data) {
     const previous = config;
     config = data;
+    acceptApplicationSettings(data.app_settings);
     acceptRules(config.routing_policy);
     if (!selectionModeTouched)
       $("task-selection-mode").value = config.routing_policy?.enabled
@@ -257,7 +290,8 @@
       if (activeTab === "task") await loadTaskModels();
     } catch (error) {
       alert(
-        activeTab === "task" ? "task-alert" : "settings-alert",
+        activeTab === "task" ? "task-alert" :
+          activeSettingsTab === "connections" ? "settings-alert" : activeSettingsTab + "-alert",
         error.message,
         "error",
       );
@@ -305,7 +339,7 @@
     $("effort").value = draft.values.effort;
     const runtime = config.runtimes[backend] || {};
     text(
-      $("runtime"),
+      $("runtime-info"),
       `${profile.runtime || names[backend]} · ${runtime.installed ? "SDK " + runtime.version + " 已安装" : "SDK 尚未安装，请运行 install.ps1"}`,
     );
     renderModels();
@@ -818,15 +852,30 @@
       text(card.time, duration(job));
       return card.node;
     });
-    const complete = nodes.filter(
-      (_, index) => list[index].status === "completed",
-    );
-    reconcile(completedJobs, complete);
-    text(completedLabel, `已完成 · 本页 ${complete.length} 个`);
-    reconcile($("jobs"), [
-      ...nodes.filter((_, index) => list[index].status !== "completed"),
-      ...(complete.length ? [completedGroup] : []),
-    ]);
+    const focused = document.activeElement;
+    const grouped = { running: [], recent: [], attention: [], completed: [] };
+    list.forEach((job, index) => {
+      const group = job.status === "running" ? "running"
+        : job.status !== "completed" ? "attention"
+        : recentCompletedIds.has(job.job_id) ? "recent" : "completed";
+      grouped[group].push(nodes[index]);
+    });
+    if ($("job-status").value !== "all") {
+      // An explicit status filter shows its results directly, without a collapsed group.
+      reconcile($("jobs"), nodes);
+    } else {
+      const groups = [];
+      for (const [name, group] of Object.entries(jobGroups)) {
+        reconcile(group.items, grouped[name]);
+        const label = name === "completed" && recentCompletedIds.size ? "更早完成" : group.label;
+        text(group.heading, `${label} · 本页 ${grouped[name].length} 个`);
+        if (grouped[name].length) groups.push(group.node);
+      }
+      reconcile($("jobs"), groups);
+    }
+    // Status changes can move the same card between groups; retain keyboard focus.
+    if (focused?.isConnected && document.activeElement !== focused)
+      focused.focus({ preventScroll: true });
   }
   function metric(label) {
     const node = el("div", "metric"),
@@ -845,6 +894,9 @@
       changesError: "",
       autoDiffSignature: "",
       result: null,
+      resultRaw: preference("default_result_view", "markdown") === "raw",
+      renderedResult: null,
+      renderedRaw: null,
       description: { text: null, complete: true, pending: false, error: "" },
       copying: false,
       copyMessage: "",
@@ -957,10 +1009,17 @@
     const resultCard = el("div", "card"),
       resultRow = el("div", "section-row");
     const copy = button("复制完整结果", () => copyResult(state)),
-      result = el("pre", "result");
+      result = el("div", "result markdown-body"),
+      resultToggle = button("查看原文", () => {
+        state.resultRaw = !state.resultRaw;
+        updateResult(state);
+      }),
+      resultActions = el("div", "result-actions");
     result.tabIndex = 0;
+    result.setAttribute("role", "region");
     result.setAttribute("aria-label", "执行结果");
-    resultRow.append(el("h3", "", "执行结果"), copy);
+    resultActions.append(resultToggle, copy);
+    resultRow.append(el("h3", "", "执行结果"), resultActions);
     const resultHint = el("p", "hint"),
       more = button("加载更多", () => loadResult(state)),
       resultError = el("div", "alert error");
@@ -1005,6 +1064,7 @@
       eventHint,
       resultCard,
       result,
+      resultToggle,
       copy,
       resultHint,
       more,
@@ -1118,6 +1178,7 @@
     if (cache) text(n.diff, cache.data.diff || "没有已跟踪文件的差异。");
     n.truncation.hidden = !cache?.data.diff_truncated;
     const files = cache?.data.untracked_files || [];
+    text(n.untrackedTitle, cache?.data.untracked_truncated ? "新增文件（仅展示部分，可在界面设置中调整）" : "新增文件");
     if (n.untracked.dataset.files !== JSON.stringify(files)) {
       n.untracked.replaceChildren(...files.map((file) => el("li", "", file)));
       n.untracked.dataset.files = JSON.stringify(files);
@@ -1190,7 +1251,7 @@
         const page = await request("job", {
           job_id: state.id,
           offset: result.next,
-          max_chars: 20000,
+          max_chars: preference("result_page_chars", 20000),
           include_description: false,
         });
         if (state.result !== result) return;
@@ -1245,7 +1306,26 @@
       result = state.result;
     n.resultCard.hidden = !result;
     if (!result) return;
-    text(n.result, result.text);
+    // Keep the rendered nodes (and the user's selection) during unrelated polls.
+    if (state.renderedResult !== result.text || state.renderedRaw !== state.resultRaw) {
+      const scroll = { top: n.result.scrollTop, left: n.result.scrollLeft };
+      n.result.className = state.resultRaw ? "result result-raw" : "result markdown-body";
+      if (state.resultRaw) n.result.textContent = result.text;
+      else {
+        n.result.innerHTML = markdown.render(result.text);
+        for (const block of n.result.querySelectorAll("pre")) {
+          block.tabIndex = 0;
+          block.setAttribute("role", "region");
+          block.setAttribute("aria-label", "结果代码块");
+        }
+      }
+      n.result.scrollTop = scroll.top;
+      n.result.scrollLeft = scroll.left;
+      state.renderedResult = result.text;
+      state.renderedRaw = state.resultRaw;
+    }
+    text(n.resultToggle, state.resultRaw ? "Markdown 预览" : "查看原文");
+    n.result.setAttribute("aria-label", state.resultRaw ? "执行结果原文" : "执行结果 Markdown 预览");
     text(
       n.resultHint,
       state.copyMessage ||
@@ -1378,7 +1458,7 @@
     text(n.time, duration(job));
     text(
       n.models,
-      `${job.progress?.model_calls || 0} / ${job.progress?.budget_model_calls || 40}`,
+      `${job.progress?.model_calls || 0}${job.progress?.budget_model_calls ? " / " + job.progress.budget_model_calls : ""}`,
     );
     text(n.tools, job.progress?.tool_calls || 0);
     text(
@@ -1491,7 +1571,7 @@
     render();
     poll(true);
   }
-  $("page-prev").onclick = () => page(Math.max(0, listOffset - 50));
+  $("page-prev").onclick = () => page(Math.max(0, listOffset - preference("jobs_page_size", 50)));
   $("page-next").onclick = () => {
     if (listNext !== null) page(listNext);
   };
@@ -1521,11 +1601,12 @@
             search: $("search").value,
             status: $("job-status").value,
             offset: listOffset,
-            limit: 50,
+            limit: preference("jobs_page_size", 50),
           });
           if (version !== listVersion) continue;
           listLoading = false;
           jobs = Array.isArray(data.jobs) ? data.jobs : [];
+          recentCompletedIds = new Set(data.recent_completed_ids || []);
           listTotal = data.total ?? jobs.length;
           listOffset = data.offset ?? 0;
           listNext = data.next_offset ?? null;
@@ -1584,7 +1665,8 @@
       if (!paused && !document.hidden)
         timer = setTimeout(
           () => poll(),
-          Math.min(30000, 1500 * 2 ** Math.min(failures, 5)),
+          Math.min(Math.max(30000, preference("poll_interval_ms", 1500)),
+            preference("poll_interval_ms", 1500) * 2 ** Math.min(failures, 5)),
         );
     });
     return pollPromise;
@@ -2515,8 +2597,208 @@
       $("route-preview").disabled = !routeState;
     }
   };
-  const tabs = ["monitor", "task", "storage", "rules", "settings"];
+  // Application preferences use independent drafts per settings page and one revision.
+  function preferenceKeys(group) {
+    return Object.keys(applicationSettings?.schema || {}).filter(
+      (name) => applicationSettings.schema[name].group === group,
+    );
+  }
+  function applicationDraft(group) {
+    const data = applicationSettings;
+    return {
+      values: Object.fromEntries(preferenceKeys(group).map((name) => [name, data.saved_values[name]])),
+      revision: data.revision, dirty: false, conflict: false,
+    };
+  }
+  function acceptApplicationSettings(data, force = false) {
+    if (!data || (applicationBusy && !force)) return;
+    const previous = applicationSettings;
+    applicationSettings = data;
+    for (const group of ["runtime", "interface"]) {
+      const draft = applicationDrafts.get(group);
+      if (!draft?.dirty) applicationDrafts.set(group, applicationDraft(group));
+      else draft.conflict = draft.revision !== data.revision;
+      renderApplicationSettings(group);
+    }
+    if (!taskTimeoutTouched) $("task-timeout").value = data.values.task_timeout_seconds;
+    const timeoutSchema = data.schema.task_timeout_seconds;
+    $("task-timeout").min = timeoutSchema.min;
+    $("task-timeout").max = timeoutSchema.max;
+    if (previous && previous.values.jobs_page_size !== data.values.jobs_page_size) changeList();
+    else if (previous && previous.values.recent_completed_count !== data.values.recent_completed_count) poll(true);
+    else if (previous && previous.values.poll_interval_ms !== data.values.poll_interval_ms && !paused) poll();
+  }
+  function renderApplicationSettings(group) {
+    const draft = applicationDrafts.get(group), container = $(group + "-fields");
+    if (!applicationSettings || !draft) return;
+    if (!container.children.length) {
+      let section, card;
+      for (const name of preferenceKeys(group)) {
+        const field = applicationSettings.schema[name];
+        if (section !== field.section) {
+          section = field.section;
+          card = el("div", "card");
+          card.append(el("h3", "", section));
+          container.append(card);
+        }
+        const wrapper = el("div", "field preference-field"),
+          label = el("label", "", field.label),
+          input = el(field.options ? "select" : "input"),
+          hint = el("p", "hint preference-hint");
+        label.htmlFor = input.id = "pref-" + name;
+        hint.id = input.id + "-hint";
+        input.setAttribute("aria-describedby", hint.id);
+        if (field.options) {
+          for (const [value, title] of Object.entries(field.options)) {
+            const option = el("option", "", title);
+            option.value = value;
+            input.append(option);
+          }
+        } else {
+          input.type = "number";
+          input.min = field.min;
+          input.max = field.max;
+          input.step = "1";
+          input.required = true;
+        }
+        input.oninput = input.onchange = () => {
+          const current = applicationDrafts.get(group);
+          current.values[name] = field.options ? input.value : Number(input.value);
+          current.dirty = preferenceKeys(group).some(
+            (key) => current.values[key] !== applicationSettings.saved_values[key],
+          );
+          if (!current.dirty) {
+            current.revision = applicationSettings.revision;
+            current.conflict = false;
+          }
+          applicationControls(group);
+        };
+        wrapper.append(label, input, hint);
+        card.append(wrapper);
+      }
+    }
+    for (const name of preferenceKeys(group)) {
+      const field = applicationSettings.schema[name], override = applicationSettings.overrides[name],
+        input = $("pref-" + name);
+      // Preserve a focused draft (including an unfinished number) during refresh.
+      if (!draft.dirty || document.activeElement !== input)
+        input.value = override ? applicationSettings.values[name] : draft.values[name];
+      text($(input.id + "-hint"), `${field.hint} 默认：${field.options?.[field.default] || field.default}。` +
+        (field.options ? "" : ` 可设置 ${field.min}–${field.max}。`) +
+        (override ? ` 当前实例由 ${override.environment} 覆盖为 ${override.value}，本机保存值为 ${applicationSettings.saved_values[name]}；移除覆盖并重启该实例后可修改。` : ""));
+    }
+    applicationControls(group);
+  }
+  function applicationControls(group) {
+    const draft = applicationDrafts.get(group);
+    for (const name of preferenceKeys(group))
+      $("pref-" + name).disabled = applicationBusy || Boolean(applicationSettings.overrides[name]);
+    $(group + "-save").disabled = applicationBusy || !draft?.dirty || draft.conflict;
+    $(group + "-reset").disabled = applicationBusy || !draft;
+    $(group + "-reload").disabled = applicationBusy;
+    text($(group + "-draft-status"), draft?.conflict
+      ? "设置已在其他窗口更新，草稿已保留。请记录修改并重新加载后合并。"
+      : draft?.dirty ? "有未保存的修改；切换标签页保留草稿，刷新页面会清除草稿。" : "");
+  }
+  for (const group of ["runtime", "interface"]) {
+    $(group + "-form").onsubmit = async (event) => {
+      event.preventDefault();
+      const draft = applicationDrafts.get(group);
+      if (applicationBusy || !draft?.dirty || draft.conflict || !$(group + "-form").reportValidity()) return;
+      applicationBusy = true;
+      configSequence++;
+      applicationSequence++;
+      for (const name of ["runtime", "interface"]) applicationControls(name);
+      alert(group + "-alert", "正在保存…");
+      try {
+        const data = await request("app-settings", { values: draft.values, revision: draft.revision });
+        applicationDrafts.delete(group);
+        // Our own other-page draft is based on unchanged fields; advance its version.
+        for (const [name, other] of applicationDrafts) {
+          if (other.revision === draft.revision) other.revision = data.revision;
+        }
+        configSequence++;
+        acceptApplicationSettings(data, true);
+        alert(group + "-alert", group === "runtime"
+          ? "设置已保存。运行预算应用于新任务，并发限制应用于后续提交。"
+          : "设置已保存。列表与刷新设置已生效，结果默认显示方式应用于首次打开的任务。", "success");
+      } catch (error) {
+        if (error.status === 409) draft.conflict = true;
+        alert(group + "-alert", error.message, "error");
+      } finally {
+        applicationBusy = false;
+        for (const name of ["runtime", "interface"]) applicationControls(name);
+      }
+    };
+    $(group + "-reset").onclick = () => {
+      const draft = applicationDrafts.get(group);
+      if (applicationBusy || !draft) return;
+      for (const name of preferenceKeys(group))
+        if (!applicationSettings.overrides[name]) draft.values[name] = applicationSettings.schema[name].default;
+      draft.dirty = preferenceKeys(group).some((name) => draft.values[name] !== applicationSettings.saved_values[name]);
+      renderApplicationSettings(group);
+      alert(group + "-alert", "已填入默认值，保存后生效。");
+    };
+    $(group + "-reload").onclick = async () => {
+      if (applicationBusy) return;
+      const sequence = ++applicationSequence;
+      applicationBusy = true;
+      configSequence++;
+      for (const name of ["runtime", "interface"]) applicationControls(name);
+      try {
+        const data = await request("app-settings");
+        if (sequence !== applicationSequence) return;
+        applicationDrafts.delete(group);
+        configSequence++;
+        acceptApplicationSettings(data, true);
+        alert(group + "-alert", "已重新加载。");
+      } catch (error) {
+        if (sequence === applicationSequence) alert(group + "-alert", error.message, "error");
+      } finally {
+        applicationBusy = false;
+        for (const name of ["runtime", "interface"]) applicationControls(name);
+      }
+    };
+  }
+  $("task-timeout").oninput = () => { taskTimeoutTouched = true; };
+  const connectionPages = ["connection-manual", "connection-local"];
+  function connectionPage(id) {
+    for (const name of connectionPages) {
+      $(name).hidden = name !== id;
+      $("tab-" + name).setAttribute("aria-selected", String(name === id));
+      $("tab-" + name).tabIndex = name === id ? 0 : -1;
+    }
+  }
+  for (const [index, id] of connectionPages.entries()) {
+    $("tab-" + id).onclick = () => connectionPage(id);
+    $("tab-" + id).onkeydown = (event) => {
+      const target = {
+        ArrowRight: (index + 1) % connectionPages.length,
+        ArrowLeft: (index + connectionPages.length - 1) % connectionPages.length,
+        Home: 0, End: connectionPages.length - 1,
+      }[event.key];
+      if (target === undefined) return;
+      event.preventDefault();
+      connectionPage(connectionPages[target]);
+      $("tab-" + connectionPages[target]).focus();
+    };
+  }
+  const tabs = ["monitor", "task", "settings"],
+    settingsTabs = ["connections", "rules", "runtime", "interface", "storage"];
+  function settingsTab(id) {
+    activeSettingsTab = id;
+    for (const name of settingsTabs) {
+      $(name).hidden = name !== id;
+      $("tab-" + name).setAttribute("aria-selected", String(name === id));
+      $("tab-" + name).tabIndex = name === id ? 0 : -1;
+    }
+    if (id === "storage" && !storageData) loadStorage();
+  }
   function tab(id) {
+    if (settingsTabs.includes(id)) {
+      settingsTab(id);
+      id = "settings";
+    }
     activeTab = id;
     for (const name of tabs) {
       $(name).hidden = name !== id;
@@ -2524,13 +2806,27 @@
       $("tab-" + name).tabIndex = name === id ? 0 : -1;
     }
     if (id === "monitor") render();
-    else if (id === "storage") {
-      if (!storageData) loadStorage();
-    } else {
+    else {
+      if (id === "settings") settingsTab(activeSettingsTab);
       if (id === "task") taskProfile();
       refreshForTab();
     }
   }
+  for (const [index, id] of settingsTabs.entries()) {
+    $("tab-" + id).onclick = () => tab(id);
+    $("tab-" + id).onkeydown = (event) => {
+      const target = {
+        ArrowRight: (index + 1) % settingsTabs.length,
+        ArrowLeft: (index + settingsTabs.length - 1) % settingsTabs.length,
+        Home: 0, End: settingsTabs.length - 1,
+      }[event.key];
+      if (target === undefined) return;
+      event.preventDefault();
+      tab(settingsTabs[target]);
+      $("tab-" + settingsTabs[target]).focus();
+    };
+  }
+  $("open-rules").onclick = () => { tab("rules"); $("tab-rules").focus(); };
   for (const [index, id] of tabs.entries()) {
     $("tab-" + id).onclick = () => tab(id);
     $("tab-" + id).onkeydown = (event) => {
@@ -2547,8 +2843,8 @@
     };
   }
   $("connection").onclick = () => {
-    tab("settings");
-    $("tab-settings").focus();
+    tab("connections");
+    $("tab-connections").focus();
   };
   document.addEventListener("visibilitychange", () => {
     clearTimeout(timer);
@@ -2572,11 +2868,11 @@
       if (config.default_project_dir)
         $("task-project").value = config.default_project_dir;
       if (!Object.values(config.profiles).some((profile) => profile.ready)) {
-        tab("settings");
+        tab("connections");
         alert("settings-alert", "选择一个代理，填写连接配置后开始使用。");
       }
     } catch (error) {
-      tab("settings");
+      tab("connections");
       alert("settings-alert", error.message, "error");
     }
     poll();

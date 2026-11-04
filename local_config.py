@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -208,32 +207,29 @@ def detect(backend: str) -> dict:
     return {"sources": results}
 
 
-def _apply(backend: str, data: dict, fields: list[str]):
+def _effective_profile(backend: str, data: dict, fields: list[str]) -> dict:
     values = data["values"]
     settings = common.load_settings(backend)
     effective = {**settings, **{k: values[k] for k in fields if k != "api_key"}}
     common.validate_profile(effective["base_url"], effective["model"], backend, effective["effort"])
     if "api_key" in fields and (data["auth"] != "api_key" or not values["api_key"]):
         raise common.RelayError("所选来源没有受支持的 API Key；请取消凭据字段或手动配置。")
+    if "api_key" in fields and values["base_url"] != effective["base_url"]:
+        raise common.RelayError("导入 API Key 时，插件地址须与来源地址一致；请同时选择地址字段。")
     changed_base = effective["base_url"] != settings["base_url"]
     if changed_base and "api_key" not in fields:
         raise common.RelayError("更换地址须同时导入该来源的 API Key，避免将旧凭据发送到新地址。")
-    env_key = os.environ.get("AGENT_HUB_" + backend.upper() + "_API_KEY", "").strip()
-    if env_key and (changed_base or "api_key" in fields) and env_key != values["api_key"]:
-        raise common.RelayError("插件环境变量中的 Key 优先级更高；请先移除该覆盖再同步地址或凭据。")
-    paths = [common.STATE_DIR / "settings.json", common.STATE_DIR / (backend + ".dpapi")]
-    previous = [p.read_bytes() if p.exists() else None for p in paths]
-    try:
+    if changed_base or "api_key" in fields:
+        common.require_matching_environment_key(backend, values["api_key"])
+    return effective
+
+
+def _apply(backend: str, data: dict, fields: list[str]):
+    effective = _effective_profile(backend, data, fields)
+    with common.profile_transaction(backend):
         if "api_key" in fields:
-            common.save_key(values["api_key"], backend)
+            common.save_key(data["values"]["api_key"], backend)
         common.save_settings(effective["base_url"], effective["model"], backend, effective["effort"])
-    except Exception:
-        for path, old in zip(paths, previous):
-            if old is None:
-                path.unlink(missing_ok=True)
-            else:
-                common._atomic_write(path, old)
-        raise
 
 
 def _managed_version(backend: str, fields: list[str]) -> str:
@@ -246,29 +242,13 @@ def _managed_version(backend: str, fields: list[str]) -> str:
     return hashlib.sha256(json.dumps(managed, sort_keys=True).encode()).hexdigest()
 
 
-@contextmanager
-def _transaction(backend: str):
-    """Roll back a synchronous write failure across profile, encrypted key and sync metadata."""
-    paths = [common.STATE_DIR / name for name in ("settings.json", backend + ".dpapi", "local-sync.json")]
-    previous = [p.read_bytes() if p.exists() else None for p in paths]
-    try:
-        yield
-    except Exception:
-        for path, old in zip(paths, previous):
-            if old is None:
-                path.unlink(missing_ok=True)
-            elif not path.exists() or path.read_bytes() != old:
-                common._atomic_write(path, old)
-        raise
-
-
 def configure(backend: str, mode: str, fields: list[str], token: str, revision: str, sync_revision: str) -> dict:
     common.check_backend(backend)
     if mode not in ("off", "import", "follow"):
         raise common.RelayError("同步模式无效。")
     if not isinstance(fields, list) or any(not isinstance(f, str) or f not in FIELDS for f in fields) or (mode != "off" and not fields):
         raise common.RelayError("请选择要导入的连接字段。")
-    with common.configuration_lock(), _transaction(backend):
+    with common.profile_transaction(backend, include_sync=True):
         common.require_revision(backend, revision)
         state = _state()
         if sync_revision != state["revision"]:
@@ -295,7 +275,7 @@ def configure(backend: str, mode: str, fields: list[str], token: str, revision: 
 
 
 def refresh(backend: str):
-    with common.configuration_lock(), _transaction(backend):
+    with common.profile_transaction(backend, include_sync=True):
         state = _state()
         item = state["profiles"].get(backend, {})
         if item.get("mode") != "follow":
@@ -315,6 +295,9 @@ def refresh(backend: str):
                 if current["fingerprint"] != item["fingerprint"]:
                     _apply(backend, current, item["fields"])
                     item.update(fingerprint=current["fingerprint"], managed_version=_managed_version(backend, item["fields"]))
+                else:
+                    # Revalidate older saved follows even when the source has not changed.
+                    _effective_profile(backend, current, item["fields"])
                 item.update(status="synced", message="正在跟随所选本地配置；仅影响新任务。")
             except Exception:
                 item.update(status="blocked", message="来源缺失、格式变化或连接字段不完整，跟随已暂停。请重新检测或关闭同步。")

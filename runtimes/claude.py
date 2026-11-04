@@ -1,5 +1,6 @@
 """Claude Code through its official SDK, native hooks and stream events."""
 from pathlib import Path
+import app_settings
 from runtimes.gemini import instructions
 
 READ_TOOLS = ["Read", "Glob", "Grep"]
@@ -37,7 +38,7 @@ def make_options(project, mode, profile, key, run_dir, events):
            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1", "CLAUDECODE": ""}
     kwargs = {"effort": profile["effort"]} if profile.get("effort") else {}
     return ClaudeAgentOptions(cwd=str(project), model=profile["model"], env=env, tools=tools, allowed_tools=tools,
-        permission_mode="dontAsk", max_turns=40, setting_sources=[], strict_mcp_config=True,
+        permission_mode="dontAsk", max_turns=app_settings.task_values(profile)["claude_max_turns"], setting_sources=[], strict_mcp_config=True,
         system_prompt={"type": "preset", "preset": "claude_code", "append": instructions(project, mode)},
         include_partial_messages=True, stderr=lambda _line: None,
         hooks={"PreToolUse": [HookMatcher(hooks=[before])], "PostToolUse": [HookMatcher(hooks=[after])],

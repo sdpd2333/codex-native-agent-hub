@@ -12,6 +12,7 @@ import threading
 import time
 import common
 import progress
+import app_settings
 
 _metadata: OrderedDict = OrderedDict()
 _metadata_lock = threading.Lock()
@@ -99,7 +100,7 @@ def auto_archive() -> int:
                 if policy()["revision"] != saved["revision"]:
                     break
                 safe_job(job_id)
-                job = progress.load_job(job_id)
+                job = progress.load_job(job_id, load_external_result=False)
                 if job and aged(job, cutoff) and eligible(job, progress.load_management(job_id)):
                     progress.update_management(job_id, archived_at=progress.now(), archive_reason="automatic")
                     count += 1
@@ -117,7 +118,7 @@ def preview_legacy() -> dict:
         try:
             with common.configuration_lock():
                 signature = safe_job(job_id)
-                job = progress.load_job(job_id)
+                job = progress.load_job(job_id, load_external_result=False)
                 if job and not job.get("conversation_id") and eligible(job, progress.load_management(job_id)):
                     entries.append((job_id, signature))
                     summaries.append({"job_id": job_id, "title": progress.display_title(job),
@@ -150,7 +151,7 @@ def archive_legacy(token) -> dict:
                 if safe_job(job_id) != signature:
                     result["skipped"] += 1
                     continue
-                job = progress.load_job(job_id)
+                job = progress.load_job(job_id, load_external_result=False)
                 if not job or job.get("conversation_id") or not eligible(job, progress.load_management(job_id)):
                     result["skipped"] += 1
                     continue
@@ -184,11 +185,12 @@ def records():
             if cached and cached[0] == signature:
                 job = cached[1]
             else:
-                job = progress.load_job(path.parent.name)
+                job = progress.load_job(path.parent.name, load_external_result=False)
                 if job:
                     job["_display_title"] = progress.display_title(job)
                     job["title"] = job["_display_title"]
-                    job["_result_chars"] = len(str(job.pop("result", "")))
+                    job["_result_chars"] = progress.result_chars(job)
+                    job.pop("result", None)
                     job.pop("task_description", None)
                 with _metadata_lock:
                     _metadata[key] = (signature, job)
@@ -196,6 +198,19 @@ def records():
                         _metadata.popitem(last=False)
             if job:
                 yield dict(job)
+
+
+def activity_time(job: dict) -> float:
+    """Use completion time for terminal tasks, including long-running and legacy jobs."""
+    for name in ("finished_at", "started_at"):
+        try:
+            value = datetime.fromisoformat(job[name].replace("Z", "+00:00"))
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return value.timestamp()
+        except (KeyError, ValueError, TypeError, AttributeError, OverflowError, OSError):
+            continue
+    return float("-inf")
 
 
 def query(*, conversation: str = "", view: str = "all", search: str = "", status: str = "all",
@@ -209,11 +224,12 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
             or offset < 0 or not 1 <= limit <= 100):
         raise common.RelayError("任务分页参数无效。")
     found, running, other_running = [], 0, 0
+    statuses = {}
     archive_error = ""
     try:
         auto_archive()
     except (common.RelayError, OSError):
-        archive_error = "自动归档暂不可用，请展开归档规则检查配置。"
+        archive_error = "自动归档暂不可用，请到设置 → 存储与归档检查配置。"
     needle = search.strip().casefold()
     for job in records():
         actual = progress.effective_status(job)
@@ -231,13 +247,20 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
         if needle and not any(needle in str(value or "").casefold() for value in fields):
             continue
         found.append(job)
-    found.sort(key=lambda job: str(job.get("started_at", "")), reverse=True)
-    found.sort(key=lambda job: progress.effective_status(job) != "running")
+        statuses[job["job_id"]] = actual
+    found.sort(key=lambda job: (activity_time(job), job["job_id"]), reverse=True)
+    recent_count = app_settings.values()["recent_completed_count"] if status == "all" and view != "archived" else 0
+    recent_ids = [job["job_id"] for job in found if statuses[job["job_id"]] == "completed"][:recent_count]
+    recent_set = set(recent_ids)
+    found.sort(key=lambda job: 0 if statuses[job["job_id"]] == "running"
+               else 1 if job["job_id"] in recent_set
+               else 2 if statuses[job["job_id"]] != "completed" else 3)
     total = len(found)
     # Keep a valid last page after archive/filter changes.
     offset = min(offset, ((total - 1) // limit) * limit if total else 0)
     return {"jobs": [progress.snapshot(job, include_result=False) for job in found[offset:offset + limit]],
             "total": total, "offset": offset, "limit": limit,
+            "recent_completed_ids": recent_ids,
             "next_offset": offset + limit if offset + limit < total else None,
             "running_count": running, "other_running_count": other_running, "archive_error": archive_error}
 
@@ -250,7 +273,7 @@ def archive(job_id: str, archived: bool) -> dict:
             safe_job(job_id)
         except OSError:
             raise common.RelayError("任务不存在或其存储路径不可安全访问。") from None
-        job = progress.load_job(job_id)
+        job = progress.load_job(job_id, load_external_result=False)
         if job is None:
             raise common.RelayError("任务不存在。")
         if progress.effective_status(job) == "running":
