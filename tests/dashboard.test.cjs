@@ -859,19 +859,20 @@ test("changing draft credentials invalidates settings model catalogs", async (t)
   assert.equal(h.$("models").children.length, 0);
 });
 
-test("complete copy follows server offsets and includes astral Unicode past the preview", async (t) => {
-  const h = await harness(t),
-    full = h.state.results[h.state.jobs[0].job_id];
-  assert.notEqual(h.$("detail").querySelector(".result").textContent, full);
-  h.findButton("复制完整结果").click();
-  await until(() => h.state.clipboard === full);
-  assert.deepEqual(
-    h.state.calls
-      .filter((item) => item.action === "job")
-      .map((item) => item.payload.offset),
-    [0, 20000, 40000, 60000],
-  );
-  assert.match(h.$("detail").textContent, /完整结果已复制/);
+test("complete Unicode copy follows server offsets with or without cursors", async (t) => {
+  for (const useCursor of [true, false]) {
+    const state = fixture();
+    state.resultCursors = useCursor;
+    const h = await harness(t, state), full = state.results[state.jobs[0].job_id];
+    assert.notEqual(h.$("detail").querySelector(".result").textContent, full);
+    h.findButton("复制完整结果").click();
+    await until(() => state.clipboard === full);
+    const pages = state.calls.filter((item) => item.action === "job").map((item) => item.payload);
+    assert.deepEqual(pages.map((p) => p.offset), [0, 20000, 40000, 60000]);
+    assert.deepEqual(pages.map((p) => p.cursor), useCursor
+      ? [undefined, "page-20000", "page-40000", "page-60000"] : Array(4).fill(undefined));
+    assert.match(h.$("detail").textContent, /完整结果已复制/);
+  }
 });
 
 test("results preview Markdown, retain per-task mode and copy the exact paginated source", async (t) => {
@@ -989,8 +990,8 @@ test("pagination failure keeps loaded text and retries the failed page", async (
   assert.deepEqual(
     h.state.calls
       .filter((item) => item.action === "job")
-      .map((item) => item.payload.offset),
-    [0, 20000, 20000],
+      .map((item) => [item.payload.offset, item.payload.cursor]),
+    [[0, undefined], [20000, "page-20000"], [20000, "page-20000"]],
   );
 });
 

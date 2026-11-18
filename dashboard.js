@@ -1328,6 +1328,7 @@
         const page = await request("job", {
           job_id: state.id,
           offset: result.next,
+          ...(result.cursor ? { cursor: result.cursor } : {}),
           max_chars: preference("result_page_chars", 20000),
           include_description: false,
         });
@@ -1345,6 +1346,7 @@
           throw new Error("结果分页响应无效，请刷新后重试。");
         result.text += page.result;
         result.next = page.next_offset;
+        result.cursor = page.next_cursor;
         result.loaded = page.next_offset ?? page.total_chars;
         result.total = page.total_chars;
       } catch (error) {

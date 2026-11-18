@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
@@ -144,15 +145,46 @@ class SettingsTests(unittest.TestCase):
 
     def test_git_limits_and_visible_truncation(self):
         self.save(git_timeout_seconds=75, diff_max_chars=1000, diff_max_files=10)
-        with patch.object(workspaces.subprocess, "run") as run:
-            run.return_value.returncode, run.return_value.stdout = 0, "fixture"
-            workspaces.git(Path(self.temp.name), "status")
-            self.assertEqual(run.call_args.kwargs["timeout"], 75)
-        with patch.object(workspaces, "git", side_effect=["x" * 1001, "\n".join(str(i) for i in range(11))]):
-            result = workspaces.changes({"path": self.temp.name})
-            self.assertEqual(len(result["diff"]), 1000)
-            self.assertEqual(len(result["untracked_files"]), 10)
-            self.assertTrue(result["diff_truncated"] and result["untracked_truncated"])
+        project = Path(self.temp.name) / "repo"
+        project.mkdir()
+        workspaces.git(project, "init")
+        tracked = project / "patch.txt"
+        tracked.write_bytes(b"base\n")
+        workspaces.git(project, "add", "patch.txt")
+        workspaces.git(project, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+        tracked.write_bytes(("很多行🙂 " + "x" * 80 + "\n").encode() * 25000)
+        for i in range(11):
+            (project / str(i)).touch()
+        raw = subprocess.check_output(["git", "-C", str(project), "diff", "HEAD", "--"], stderr=subprocess.PIPE)
+        self.assertGreater(len(raw), 2_000_000)
+        tracemalloc.start()
+        try:
+            with patch.object(workspaces, "git", wraps=workspaces.git) as calls:
+                result = workspaces.changes({"path": str(project)})
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertTrue(all(call.kwargs["timeout"] == 75 for call in calls.call_args_list))
+        self.assertLess(peak, 512 * 1024, f"preview retained too much of a {len(raw)}-byte patch")
+        self.assertEqual(result["diff"], raw.decode()[:1000])
+        self.assertEqual(len(result["untracked_files"]), 10)
+        self.assertTrue(result["diff_truncated"] and result["untracked_truncated"])
+
+    def test_git_preview_checks_late_exit_and_reaps_a_timed_out_process(self):
+        popen = subprocess.Popen
+        for script, message in (("import sys; sys.stdout.buffer.write(b'x'*100000); sys.exit(7)", "Git 操作失败"),
+                                ("import time; time.sleep(30)", "Git 操作超时")):
+            started = []
+            def launch(args, **options):
+                if args[0] != "git":  # Allow Windows taskkill to run normally.
+                    return popen(args, **options)
+                started.append(popen([sys.executable, "-c", script], **options))
+                return started[-1]
+            with self.subTest(message=message), patch.object(subprocess, "Popen", side_effect=launch):
+                with self.assertRaisesRegex(common.RelayError, message):
+                    workspaces.git(Path(self.temp.name), "diff", read=lambda stream: workspaces._diff_preview(stream, 5),
+                                   timeout=0.3 if "超时" in message else 5)
+            self.assertIsNotNone(started[0].poll())
 
 
 class LiveSettingsTests(unittest.IsolatedAsyncioTestCase):

@@ -30,30 +30,74 @@ class ResultStorageTests(unittest.IsolatedAsyncioTestCase):
         self.record = progress.job_dir(self.job["job_id"]) / "job.json"
 
     async def test_large_unicode_result_survives_restart_and_complete_paging(self):
-        full = "汉字🙂abc\r\n" * 160000
+        full = "\n汉字🙂汉字Ω丙丁\r" * 100000  # Every page splits a CRLF pair.
+        self.assertEqual(len(full), 1_000_000)
         self.assertGreater(len(full.encode()), 2 * 1024 * 1024)
         progress.save_job(self.job | {"result": full})
         metadata = json.loads(self.record.read_text(encoding="utf-8"))
         self.assertNotIn("result", metadata)
         self.assertLess(self.record.stat().st_size, 2048)
         self.assertEqual(metadata["_result_chars"], len(full))
-        with patch.object(progress, "read_result", side_effect=AssertionError("History read full result")):
+        with patch.object(progress, "result_page", side_effect=AssertionError("History read result file")):
             listed = history.query()["jobs"][0]
         self.assertEqual(listed["result_chars"], len(full))
         self.assertNotIn("_result_file", listed)
-        pieces, offset = [], 0
-        while offset is not None:
-            page = await server.get_job(self.job["job_id"], offset=offset, max_chars=50000,
-                                        include_description=False)
-            self.assertEqual(page["offset"], offset)
-            self.assertEqual(page["total_chars"], len(full))
-            self.assertNotIn("_result_file", page)
-            pieces.append(page["result"])
-            offset = page["next_offset"]
+        path = self.record.parent / metadata["_result_file"]
+        opener = Path.open
+        decoded = 0
+        def count_reads(file, *args, **kwargs):
+            stream = opener(file, *args, **kwargs)
+            if file == path:
+                read = stream.read
+                def count(size=-1):
+                    nonlocal decoded
+                    text = read(size)
+                    decoded += len(text)
+                    return text
+                stream.read = count
+            return stream
+        pieces, offset, cursor = [], 0, None
+        with patch.object(Path, "open", new=count_reads):
+            while offset is not None:
+                page = await server.get_job(self.job["job_id"], offset=offset, max_chars=10000,
+                                            include_description=False, cursor=cursor)
+                self.assertEqual(page["offset"], offset)
+                self.assertEqual(page["total_chars"], len(full))
+                self.assertNotIn("_result_file", page)
+                pieces.append(page["result"])
+                offset, cursor = page["next_offset"], page.get("next_cursor")
+        self.assertEqual(len(pieces), 100)
+        self.assertEqual(decoded, len(full))
         self.assertEqual("".join(pieces), full)
         beyond = await server.get_job(self.job["job_id"], offset=len(full) + 1)
         self.assertEqual(beyond["result"], "")
         self.assertIsNone(beyond["next_offset"])
+
+    async def test_cursor_binds_job_result_and_offset_and_survives_a_cold_cache(self):
+        full = "a\r汉🙂\n" * 110
+        other = self.job | {"job_id": "0" * 16}
+        for job in (self.job, other):
+            progress.save_job(job | {"result": full})
+        first = await server.get_job(self.job["job_id"], max_chars=101)
+        offset, cursor = first["next_offset"], first["next_cursor"]
+        progress._page_positions.clear()  # Evicted checkpoint or service restart.
+        page = await server.get_job(self.job["job_id"], offset=offset, max_chars=103, cursor=cursor)
+        self.assertEqual(page["result"], full[offset:offset + 103])
+        for job_id, start, token in ((other["job_id"], offset, cursor), (self.job["job_id"], offset + 1, cursor),
+                                     (self.job["job_id"], offset, "bad-cursor")):
+            with self.subTest(start=start, job_id=job_id), self.assertRaisesRegex(common.RelayError, "游标"):
+                await server.get_job(job_id, offset=start, cursor=token)
+        progress.save_job(self.job | {"result": "x" * len(full)})
+        with self.assertRaisesRegex(common.RelayError, "游标"):
+            await server.get_job(self.job["job_id"], offset=offset, cursor=cursor)
+
+    async def test_truncated_file_cannot_satisfy_an_issued_cursor(self):
+        progress.save_job(self.job | {"result": "测🙂\r\n" * 250})
+        first = await server.get_job(self.job["job_id"], max_chars=100)
+        path = self.record.parent / json.loads(self.record.read_bytes())["_result_file"]
+        path.write_bytes(first["result"].encode())
+        with self.assertRaisesRegex(common.RelayError, "不完整"):
+            await server.get_job(self.job["job_id"], offset=first["next_offset"], cursor=first["next_cursor"])
 
     async def test_budget_and_timeout_snapshots_survive_reload_and_history(self):
         limits = app_settings.task_values() | {"max_model_calls": 7, "max_tool_calls": 11}

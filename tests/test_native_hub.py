@@ -259,18 +259,36 @@ class WorktreeTests(unittest.TestCase):
             with patch.object(common, 'STATE_DIR', root / 'state'):
                 workspaces.git(project, 'init', '-b', 'main')
                 (project / 'file.txt').write_text('original\n')
-                workspaces.git(project, 'add', 'file.txt')
+                (project / '.gitignore').write_text('build/\n')
+                workspaces.git(project, 'add', 'file.txt', '.gitignore')
                 workspaces.git(project, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture')
+                workspaces.git(project, 'config', 'status.showUntrackedFiles', 'no')
+                workspaces.git(project, 'config', 'core.quotePath', 'true')
+                (project / 'build').mkdir()
+                (project / 'build' / 'output').touch()
+                draft = project / 'draft.txt'
+                draft.touch()
+                with self.assertRaisesRegex(common.RelayError, '未提交'):
+                    workspaces.prepare(project, '3' * 16, 'gemini', 'edit', 'worktree')
+                self.assertEqual(workspaces.prepare(project, '3' * 16, 'gemini', 'edit', 'direct')['path'], str(project))
+                draft.unlink()
                 first = workspaces.prepare(project, '1' * 16, 'claude', 'edit', 'worktree')
                 second = workspaces.prepare(project, '2' * 16, 'deepseek', 'edit', 'worktree')
                 assigned = Path(first['path'])
+                self.assertEqual(workspaces.changes(first)['untracked_files'], [])
                 (assigned / 'file.txt').write_text('modified\n')
-                (assigned / 'new.txt').write_text('new\n')
+                names = [' first.txt', 'line\u2028break.txt', '任务.md']
+                for name in names:
+                    (assigned / name).touch()
                 self.assertEqual((project / 'file.txt').read_text(), 'original\n')
                 self.assertEqual((Path(second['path']) / 'file.txt').read_text(), 'original\n')
+                index = Path(workspaces.git(assigned, 'rev-parse', '--absolute-git-dir')) / 'index'
+                before = index.read_bytes()
                 diff = workspaces.changes(first)
                 self.assertIn('+modified', diff['diff'])
-                self.assertEqual(diff['untracked_files'], ['new.txt'])
+                self.assertEqual(diff['untracked_files'], names)
+                self.assertFalse(diff['untracked_truncated'] or diff['diff_truncated'])
+                self.assertEqual(index.read_bytes(), before)
                 (project / 'file.txt').write_text('user change\n')
                 with self.assertRaises(common.RelayError):
                     workspaces.prepare(project, '3' * 16, 'gemini', 'edit', 'worktree')
