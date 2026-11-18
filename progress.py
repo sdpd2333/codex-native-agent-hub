@@ -1,7 +1,7 @@
 """Persist job summaries and extract activity metadata, never model thoughts or tool output."""
 from __future__ import annotations
 
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 import ctypes
 from ctypes import wintypes
@@ -92,47 +92,95 @@ def result_chars(job: dict) -> int:
     return len(job["result"]) if "result" in job else job.get("_result_chars", 0)
 
 
+# Only server-issued stream positions live here, never file handles or result text.
+# A restart/eviction loses the fast path, not the validity of the character offset.
+_page_positions: OrderedDict[str, int] = OrderedDict()
+_page_lock = threading.Lock()
+
+
+def _page_cursor(job_id: str, name: str, offset: int) -> str:
+    return hashlib.sha256(f"{job_id}:{name}:{offset}".encode("ascii")).hexdigest()
+
+
 def read_result(job: dict, offset: int = 0, max_chars: int | None = None) -> str:
+    return result_page(job, offset, max_chars)["result"]
+
+
+def result_page(job: dict, offset: int, max_chars: int | None, cursor: str | None = None) -> dict:
+    total = result_chars(job)
+    end = total if max_chars is None else min(offset + max_chars, total)
+    page = {"offset": offset, "total_chars": total, "next_offset": end if end < total else None}
     if "result" in job:
-        return job["result"][offset:None if max_chars is None else offset + max_chars]
+        if cursor is not None:
+            raise common.RelayError("结果分页游标无效或结果已更新，请重新加载。")
+        return page | {"result": job["result"][offset:end]}
     name = job.get("_result_file", "")
     if not isinstance(name, str) or not RESULT_FILE.fullmatch(name):
         raise common.RelayError("任务结果文件引用无效。")
+    job_id = job["job_id"]
+    position = None
+    if cursor is not None:
+        if cursor != _page_cursor(job_id, name, offset):
+            raise common.RelayError("结果分页游标无效或结果已更新，请重新加载。")
+        with _page_lock:
+            position = _page_positions.get(cursor)
     try:
-        # Text offsets are Unicode characters. Skip bounded chunks instead of
-        # loading a large result in full for every page; preserve CRLF verbatim.
-        with (job_dir(job["job_id"]) / name).open(encoding="utf-8", newline="") as stream:
-            remaining = offset
-            while remaining:
-                skipped = stream.read(min(remaining, 65536))
-                if not skipped:
-                    break
-                remaining -= len(skipped)
-            result = stream.read() if max_chars is None else stream.read(max_chars)
-        expected = max(0, result_chars(job) - offset)
-        if len(result) != (expected if max_chars is None else min(expected, max_chars)):
-            raise common.RelayError("任务结果文件不完整，请检查本地任务数据。")
-        return result
+        # No newline translation: CR, LF and astral characters keep their original offsets.
+        with (job_dir(job_id) / name).open(encoding="utf-8", newline="\n") as stream:
+            if position is not None:
+                stream.seek(position)
+            else:
+                remaining = offset
+                while remaining:
+                    skipped = stream.read(min(remaining, 65536))
+                    if not skipped:
+                        break
+                    remaining -= len(skipped)
+            page["result"] = stream.read() if max_chars is None else stream.read(max_chars)
+            if len(page["result"]) != max(0, end - offset):
+                raise common.RelayError("任务结果文件不完整，请检查本地任务数据。")
+            if end < total:
+                key = _page_cursor(job_id, name, end)
+                next_position = stream.tell()  # Seek cookie at an actual UTF-8 character boundary.
+                with _page_lock:
+                    _page_positions[key] = next_position
+                    _page_positions.move_to_end(key)
+                    if len(_page_positions) > 256:
+                        _page_positions.popitem(last=False)
+                page["next_cursor"] = key
+        return page
     except (OSError, UnicodeError):
         raise common.RelayError("任务结果文件无法读取，请检查本地任务数据。") from None
 
 
-def load_management(job_id: str) -> dict:
+MAX_MANAGEMENT_BYTES = 65536
+
+
+def load_management(job_id: str, *, strict: bool = False) -> dict:
     path = job_dir(job_id) / "management.json"
     try:
-        if path.stat().st_size > 65536:
-            return {}
+        if path.stat().st_size > MAX_MANAGEMENT_BYTES:
+            raise ValueError("oversized management sidecar")
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            raise ValueError("invalid management sidecar")
+        return data
+    except FileNotFoundError:
+        return {}
     except (OSError, ValueError):
+        if strict:
+            raise common.RelayError("任务管理记录无法读取，已保留原记录。") from None
         return {}
 
 
 def update_management(job_id: str, **values) -> dict:
     # A sidecar prevents a running/older service's save_job from undoing an archive.
     with common.configuration_lock():
-        data = load_management(job_id) | values
-        common._atomic_write(job_dir(job_id) / "management.json", json.dumps(data, ensure_ascii=False).encode("utf-8"))
+        data = load_management(job_id, strict=True) | values
+        encoded = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > MAX_MANAGEMENT_BYTES:
+            raise common.RelayError("任务管理记录过大，已保留原记录。")
+        common._atomic_write(job_dir(job_id) / "management.json", encoded)
         return data
 
 
@@ -184,6 +232,7 @@ class TranscriptTracker:
 
     def __init__(self):
         self.path: Path | None = None
+        self.stat: os.stat_result | None = None
         self.offset = 0
         self.pending = b""
         self.dropping = False
@@ -195,18 +244,32 @@ class TranscriptTracker:
         self.phase = "正在启动 Antigravity"
         self.last_activity_at = None
 
-    def update(self, directory: Path, *, complete: bool = False) -> dict:
+    def update(self, directory: Path, *, paths: list[Path] | None = None, backup: dict | None = None) -> dict:
+        complete = paths is not None
         try:
             # The SDK stores its live JSONL under app_data_dir; save_dir may
             # contain only a session database. Keep the older layout supported.
-            paths = list((directory / "runtime" / "brain").rglob("transcript.jsonl"))
-            paths.extend((directory / "session").rglob("transcript.jsonl"))
+            if paths is None:
+                paths = list((directory / "runtime" / "brain").rglob("transcript.jsonl"))
+                paths.extend((directory / "session").rglob("transcript.jsonl"))
+            # After a partial cleanup an older transcript may still exist. It is
+            # not a substitute for the source of the saved counters. Only compare
+            # the saved name with discovered files; never open a sidecar-supplied path.
+            if backup is not None:
+                source = backup.get("_transcript")
+                if not paths or (source and all(p.relative_to(directory).as_posix() != source for p in paths)):
+                    return backup
             if paths:
                 path = max(paths, key=lambda item: item.stat().st_mtime_ns)
-                size = path.stat().st_size
-                if path != self.path or size < self.offset:
+                info = path.stat()
+                size = info.st_size
+                # A same-name replacement or in-place rewrite is not an append.
+                old = self.stat
+                if (old is None or path != self.path or not os.path.samestat(info, old) or size < old.st_size
+                        or (size == old.st_size and info.st_mtime_ns != old.st_mtime_ns)):
                     self.__init__()
                     self.path = path
+                self.stat = info
                 with path.open("rb") as stream:
                     stream.seek(self.offset)
                     end = size if complete else min(size, self.offset + 2 * 1024 * 1024)
@@ -222,9 +285,11 @@ class TranscriptTracker:
             if complete:
                 raise  # Cleanup must preserve logs when the final summary cannot be read.
             pass  # A transcript may be rotating or not yet created.
-        return {"phase": self.phase, "model_calls": len(self.models),
-                "tool_calls": sum(self.tools.values()),
-                "last_activity_at": self.last_activity_at, "events": list(self.events)}
+        activity = {"phase": self.phase, "model_calls": len(self.models), "tool_calls": sum(self.tools.values()),
+                    "last_activity_at": self.last_activity_at, "events": list(self.events)}
+        if complete:
+            activity["_transcript"] = self.path.relative_to(directory).as_posix() if self.path else None
+        return activity
 
     def consume(self, chunk: bytes) -> None:
         pieces = (self.pending + chunk).split(b"\n")
@@ -276,24 +341,42 @@ _trackers: dict[str, TranscriptTracker] = {}
 _tracker_lock = threading.RLock()
 
 
-def snapshot(job: dict, *, include_result: bool = True, complete_activity: bool = False) -> dict:
+def _job_activity(job: dict, management: dict, event_limit: int, *, log_paths: set[Path] | None = None) -> dict:
+    backup = management.get("activity_summary")
+    if not isinstance(backup, dict):
+        backup = None
+    directory = job_dir(job["job_id"])
+    if job.get("backend", "gemini") != "gemini":
+        path = directory / "activity.jsonl"
+        return read_activity(path, event_limit, complete=log_paths is not None and path in log_paths, missing=backup)
+    if backup is not None and "_transcript" not in backup and management.get("logs_cleaned_at"):
+        return backup  # Older Gemini backups did not record which transcript was cleaned.
     with _tracker_lock:
-        return _snapshot(job, include_result=include_result, complete_activity=complete_activity)
+        job_id = job["job_id"]
+        if job_id not in _trackers:
+            if len(_trackers) >= 60:
+                _trackers.pop(next(iter(_trackers)))
+            _trackers[job_id] = TranscriptTracker()
+        paths = None if log_paths is None else [
+            p for p in log_paths if p.name == "transcript.jsonl" and
+            (p.is_relative_to(directory / "runtime" / "brain") or p.is_relative_to(directory / "session"))]
+        return _trackers[job_id].update(directory, paths=paths, backup=backup)
 
 
-def _snapshot(job: dict, *, include_result: bool = True, complete_activity: bool = False) -> dict:
+def backup_activity(job: dict, log_paths: set[Path]) -> None:
     job_id = job["job_id"]
-    preferences = app_settings.values()
+    summary = _job_activity(job, load_management(job_id, strict=True), app_settings.SCHEMA["activity_event_limit"]["max"],
+                            log_paths=log_paths)
+    update_management(job_id, activity_summary=summary)
+
+
+def snapshot(job: dict, *, include_result: bool = True, preferences: dict | None = None) -> dict:
+    job_id = job["job_id"]
+    if preferences is None:
+        preferences = app_settings.values()
     management = load_management(job_id)
-    if job_id not in _trackers:
-        if len(_trackers) >= 60:
-            _trackers.pop(next(iter(_trackers)))
-        _trackers[job_id] = TranscriptTracker()
-    activity = management.get("activity_summary") if management.get("logs_cleaned_at") else None
-    if not isinstance(activity, dict):
-        activity = (_trackers[job_id].update(job_dir(job_id), complete=complete_activity) if job.get("backend", "gemini") == "gemini"
-                    else read_activity(job_dir(job_id) / "activity.jsonl", preferences["activity_event_limit"]))
-    activity = dict(activity)
+    activity = _job_activity(job, management, preferences["activity_event_limit"]).copy()
+    activity.pop("_transcript", None)
     # Legacy jobs were launched with the original budgets, not today's preferences.
     limits = job.get("runtime_settings") or app_settings.DEFAULTS
     activity["budget_model_calls"] = limits["max_model_calls"]

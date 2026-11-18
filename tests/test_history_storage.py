@@ -52,6 +52,15 @@ class HistoryStorageTests(unittest.TestCase):
             os.utime(path, (self.old.timestamp(), self.old.timestamp()))
         return path
 
+    def activity_log(self, job, calls=1):
+        if job["backend"] == "gemini":
+            name = "runtime/brain/run/transcript.jsonl"
+            rows = [{"type": "PLANNER_RESPONSE", "step_index": i, "tool_calls": [{}]} for i in range(calls)]
+        else:
+            name = "activity.jsonl"
+            rows = [{"kind": "model", "label": "模型处理任务"}, {"kind": "tool", "label": "读取文件"}] * calls
+        return self.log(job, name, "".join(json.dumps(row) + "\n" for row in rows).encode())
+
     def link_dir(self, source, target):
         if os.name == "nt":
             # A junction needs no symlink privilege; remove it with rmdir in test teardown.
@@ -228,23 +237,120 @@ class HistoryStorageTests(unittest.TestCase):
                 summary = progress.snapshot(job)["progress"]
                 self.assertEqual((summary["model_calls"], summary["tool_calls"]), (10, 10))
 
-    def test_cleanup_keeps_transcript_when_its_final_summary_cannot_be_read(self):
-        job = self.job(backend="gemini")
-        transcript = self.log(job, "runtime/brain/session/transcript.jsonl", b'{}\n')
+    def test_cleanup_keeps_every_log_of_a_job_when_its_activity_cannot_be_read(self):
+        jobs = [self.job(i, backend=name) for i, name in enumerate(("gemini", "claude", "deepseek"), 1)]
+        logs = {self.activity_log(job) for job in jobs}
+        other = [self.log(job) for job in jobs]
         plan = storage.preview(30)
         original = Path.open
 
         def fail(path, *args, **kwargs):
-            if path == transcript:
+            if path in logs:
                 raise PermissionError("fixture read failure")
             return original(path, *args, **kwargs)
 
         with patch.object(Path, "open", new=fail):
+            for job in jobs:
+                progress.snapshot(job)  # A transient read failure does not break panel polling.
             result = storage.cleanup(plan["token"])
         self.assertEqual(result["deleted_files"], 0)
-        self.assertEqual(result["errors"], 1)
-        self.assertTrue(transcript.exists())
-        self.assertNotIn("logs_cleaned_at", progress.load_management(job["job_id"]))
+        self.assertEqual((result["errors"], result["skipped_files"]), (3, 6))
+        self.assertTrue(all(path.exists() for path in [*logs, *other]))
+        for job in jobs:
+            activity = progress.snapshot(job)["progress"]
+            self.assertEqual((activity["model_calls"], activity["tool_calls"]), (1, 1))
+            self.assertNotIn("logs_cleaned_at", progress.load_management(job["job_id"]))
+
+    def test_changed_activity_is_live_after_zero_or_partial_deletion(self):
+        job = self.job()
+        self.activity_log(job)
+        for removed in (0, 1):
+            if removed:
+                self.log(job)
+            plan = storage.preview(30)
+            self.activity_log(job, calls=2 + removed)
+            result = storage.cleanup(plan["token"])
+            self.assertEqual((result["deleted_files"], result["jobs_cleaned"], result["errors"]), (removed, removed, 0))
+            self.activity_log(job, calls=4 + removed)
+            snapshot = progress.snapshot(job)
+            self.assertEqual(bool(snapshot["logs_cleaned_at"]), bool(removed))
+            self.assertEqual(snapshot["progress"]["model_calls"], 4 + removed)
+
+    def test_replaced_gemini_transcript_is_not_mistaken_for_an_append(self):
+        job = self.job(backend="gemini")
+        path = self.activity_log(job)
+        self.assertEqual(progress.snapshot(job)["progress"]["tool_calls"], 1)
+        plan = storage.preview(30)
+        replacement = path.with_suffix(".tmp")
+        replacement.write_bytes(path.read_bytes().replace(b"[{}]", b"[  ]"))
+        replacement.replace(path)
+        self.assertEqual(storage.cleanup(plan["token"])["deleted_files"], 0)
+        snapshot = progress.snapshot(job)
+        self.assertIsNone(snapshot["logs_cleaned_at"])
+        self.assertEqual((snapshot["progress"]["model_calls"], snapshot["progress"]["tool_calls"]), (1, 0))
+
+    def test_interrupted_unlink_recovers_counts_on_restart_and_retry(self):
+        unlink = Path.unlink
+        for i, backend in enumerate(("claude", "gemini"), 1):
+            with self.subTest(backend=backend):
+                job = self.job(i, backend=backend)
+                source = self.activity_log(job, calls=2)
+                # An older surviving Gemini transcript must not supersede the backup.
+                rest = self.log(job, "session/old/transcript.jsonl", b"{}\n")
+                older = self.old.timestamp() - 60
+                os.utime(rest, (older, older))
+                history.archive(job["job_id"], True)
+                plan = storage.preview(30)
+                def interrupt(path, *args, **kwargs):
+                    unlink(path, *args, **kwargs)
+                    if path == source:
+                        raise RuntimeError("simulated process exit")
+                with patch.object(Path, "unlink", new=interrupt), self.assertRaisesRegex(RuntimeError, "process exit"):
+                    storage.cleanup(plan["token"])
+                self.assertFalse(source.exists())
+                self.assertTrue(rest.exists())
+                progress._trackers.clear()
+                snapshot = progress.snapshot(job)
+                self.assertIsNone(snapshot["logs_cleaned_at"])
+                self.assertEqual((snapshot["progress"]["model_calls"], snapshot["progress"]["tool_calls"]), (2, 2))
+                self.assertEqual(storage.cleanup(storage.preview(30)["token"])["deleted_files"], 1)
+                after = progress.snapshot(job)
+                self.assertTrue(after["logs_cleaned_at"] and after["archived"])
+                self.assertEqual(after["progress"], snapshot["progress"])
+
+    def test_receipt_write_failure_reports_actual_deletion_and_retains_backup(self):
+        job = self.job()
+        self.activity_log(job)
+        plan = storage.preview(30)
+        update = progress.update_management
+        def fail_receipt(job_id, **values):
+            if "logs_cleaned_at" in values:
+                raise PermissionError("receipt unavailable")
+            return update(job_id, **values)
+        with patch.object(progress, "update_management", side_effect=fail_receipt):
+            result = storage.cleanup(plan["token"])
+        self.assertEqual((result["deleted_files"], result["jobs_cleaned"], result["errors"]), (1, 1, 1))
+        self.assertIsNone(progress.snapshot(job)["logs_cleaned_at"])
+        self.assertEqual(progress.snapshot(job)["progress"]["model_calls"], 1)
+
+    def test_unreadable_or_oversized_backup_never_replaces_archive_or_deletes_logs(self):
+        job = self.job()
+        log = self.activity_log(job)
+        history.archive(job["job_id"], True)
+        sidecar = log.parent / "management.json"
+        archived = sidecar.read_bytes()
+        plan = storage.preview(30)
+        sidecar.write_bytes(b"broken")
+        result = storage.cleanup(plan["token"])
+        self.assertEqual((result["errors"], result["deleted_files"]), (1, 0))
+        self.assertEqual(sidecar.read_bytes(), b"broken")
+        sidecar.write_bytes(archived)
+        plan = storage.preview(30)
+        with patch.object(progress, "MAX_MANAGEMENT_BYTES", len(archived)):
+            result = storage.cleanup(plan["token"])
+        self.assertEqual((result["errors"], result["deleted_files"]), (1, 0))
+        self.assertTrue(log.exists())
+        self.assertEqual(sidecar.read_bytes(), archived)
 
     def test_changed_files_and_new_files_are_preserved(self):
         job = self.job()

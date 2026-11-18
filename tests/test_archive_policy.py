@@ -55,8 +55,11 @@ class ArchivePolicyTests(unittest.TestCase):
         legacy = self.job(2, conversation_id="")
         progress.update_management(old["job_id"], activity_summary={"model_calls": 3}, logs_cleaned_at="kept")
         original = (progress.job_dir(old["job_id"]) / "job.json").read_bytes()
-        self.assertEqual(history.query()["total"], 0)
-        self.assertEqual(history.query(view="archived")["total"], 2)
+        with patch.object(history, "records", wraps=history.records) as scans:
+            self.assertEqual(history.query()["total"], 0)
+            self.assertEqual(history.query(view="archived")["total"], 2)
+            self.assertEqual(history.query()["total"], 0)
+            self.assertEqual(scans.call_count, 3)
         self.assertEqual(history.auto_archive(), 0)
         for job in (old, legacy):
             snapshot = progress.snapshot(job)

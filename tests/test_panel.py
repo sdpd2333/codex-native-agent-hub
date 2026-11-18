@@ -398,17 +398,18 @@ class PanelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["result_chars"], len(full))
         self.assertNotIn("result", summary)
         self.assertLess(len(body), 3000)
-        offset, pieces = 0, []
+        offset, pieces, cursor = 0, [], None
         while offset is not None:
-            status, body, _ = await self.request("api/job", "POST", {"job_id": job["job_id"], "offset": offset})
+            status, body, _ = await self.request("api/job", "POST", {"job_id": job["job_id"], "offset": offset, "cursor": cursor})
             self.assertEqual(status, 200)
             page = json.loads(body)
             self.assertEqual(page["offset"], offset)
             self.assertEqual(page["total_chars"], len(full))
             pieces.append(page["result"])
-            offset = page["next_offset"]
+            offset, cursor = page["next_offset"], page.get("next_cursor")
         self.assertEqual("".join(pieces), full)
-        for invalid in ({"offset": True}, {"offset": -1}, {"offset": "0"}, {"max_chars": "20000"}, {"max_chars": 50001}):
+        for invalid in ({"offset": True}, {"offset": -1}, {"offset": "0"}, {"max_chars": "20000"}, {"max_chars": 50001},
+                        {"offset": 20000, "cursor": "invalid"}):
             self.assertEqual((await self.request("api/job", "POST", {"job_id": job["job_id"], **invalid}))[0], 400)
 
     async def test_short_title_and_full_redacted_description_survive_restart_without_bloating_polling(self):

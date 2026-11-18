@@ -317,8 +317,8 @@ async def panel_dispatch(method: str, action: str, payload: dict) -> dict:
         return await get_changes(str(payload.get("job_id", "")))
     if action == "job":
         return await get_job(str(payload.get("job_id", "")), offset=payload.get("offset", 0),
-                             max_chars=payload.get("max_chars", app_settings.values()["result_page_chars"]),
-                             include_description=payload.get("include_description", True))
+                             max_chars=payload.get("max_chars"), include_description=payload.get("include_description", True),
+                             cursor=payload.get("cursor"))
     raise common.RelayError("接口不存在。")
 
 
@@ -536,7 +536,6 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
                 raise common.RelayError("模型 ID 无效。")
             profile = common.validate_profile(settings["base_url"], selected, backend, settings["effort"])
             key = common.load_key(backend)
-        require_task_capacity()
         selection = {"model": profile["model"], "mode": "explicit" if model is not None else "default",
                      "default_model": settings["model"],
                      "reason": "本次明确指定模型。" if model is not None else "自动选型已关闭，使用保存的默认模型。"}
@@ -556,8 +555,7 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
             else:
                 selection = model_selection.choose_model(models, backend, profile["model"], task_complexity)
             profile["model"] = selection["model"]
-            # Model discovery yields the event loop, so recheck the running-job limit.
-            require_task_capacity()
+    # Both routing and model discovery can yield before registration.
     require_task_capacity()
     if len(JOBS) >= 50:
         for job_id, old in list(JOBS.items()):
@@ -588,12 +586,13 @@ async def submit_task(task: str, project_dir: str, backend: Literal["gemini", "c
 
 @mcp.tool(annotations=READ)
 async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars: int | None = None,
-                  include_description: bool = True) -> dict:
+                  include_description: bool = True, cursor: str | None = None) -> dict:
     """Read status, full task description and paginated result; optionally wait up to 20 seconds.
 
     Use include_description=false for result paging/status polling. Legacy description prefixes
     are marked task_description_complete=false; their lost text cannot be recovered here.
-    Omit max_chars to use the saved result page size.
+    Omit max_chars to use the saved result page size. For the next page pass next_offset
+    as offset and, when returned, next_cursor as cursor. Offset-only clients still work.
     """
     job = JOBS.get(job_id) or progress.load_job(job_id, load_external_result=False)
     if job is None:
@@ -614,10 +613,7 @@ async def get_job(job_id: str, wait_seconds: int = 0, offset: int = 0, max_chars
         result.update(task_description=job.get("task_description", job.get("title", "")),
                       task_description_complete="task_description" in job)
     if "result" in job or "_result_file" in job:
-        total = progress.result_chars(job)
-        page = await asyncio.to_thread(progress.read_result, job, offset, max_chars)
-        result.update(result=page, offset=offset, total_chars=total,
-                      next_offset=offset + max_chars if offset + max_chars < total else None)
+        result.update(await asyncio.to_thread(progress.result_page, job, offset, max_chars, cursor))
     return result
 
 

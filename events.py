@@ -13,6 +13,7 @@ LABELS = {
     "apply_patch": "应用补丁", "bash": "执行命令", "pwsh": "执行命令", "run_command": "执行命令",
     "working_directory": "查看工作目录", "finish": "整理结果",
 }
+ACTIVITY_LABELS = frozenset(LABELS.values()) | {"模型处理任务", "正在启动运行环境", "整理结果", "使用工具"}
 
 
 class EventWriter:
@@ -52,27 +53,34 @@ class EventWriter:
             self.emit("tool_end" if done else "tool", label)
 
 
-def read_activity(path: Path, event_limit: int = 30) -> dict:
+def read_activity(path: Path, event_limit: int = 30, *, complete: bool = False, missing: dict | None = None) -> dict:
     """Only normalized fields created by EventWriter are returned to the panel."""
     models = tools = 0
     events = deque(maxlen=event_limit)
     try:
         with path.open("r", encoding="utf-8") as stream:
             # Bounded rows cover the largest supported budgets without losing counts.
-            for number in range(20000):
+            for _ in range(20000):
                 line = stream.readline(4097)
-                if not line or len(line) > 4096:
+                if not line:
+                    break
+                if len(line) > 4096:
+                    if complete:
+                        raise ValueError("activity row exceeds the supported size")
                     break
                 try:
                     row = json.loads(line)
                 except ValueError:
+                    if complete:
+                        raise
+                    continue
+                if not isinstance(row, dict):
                     continue
                 kind = row.get("kind")
                 if kind not in ("model", "tool", "tool_end", "started", "finished"):
                     continue
                 label = row.get("label")
-                valid = {"模型处理任务", "正在启动运行环境", "整理结果"} | set(LABELS.values())
-                if not isinstance(label, str) or label.split(" · ")[0] not in valid | {"使用工具"}:
+                if not isinstance(label, str) or label.partition(" · ")[0] not in ACTIVITY_LABELS:
                     continue
                 stamp = row.get("timestamp")
                 if not isinstance(stamp, str) or len(stamp) > 40:
@@ -80,8 +88,17 @@ def read_activity(path: Path, event_limit: int = 30) -> dict:
                 models += kind == "model"
                 tools += kind == "tool"
                 events.append({"timestamp": stamp, "label": label})
-    except OSError:
-        pass
+            else:
+                if complete and stream.read(1):
+                    raise ValueError("activity log exceeds the supported row count")
+    except FileNotFoundError:
+        if complete:  # Cleanup had already discovered this file.
+            raise
+        if missing is not None:
+            return missing
+    except (OSError, UnicodeError):
+        if complete:
+            raise
     return {"phase": events[-1]["label"] if events else "正在启动运行环境", "model_calls": models,
             "tool_calls": tools, "events": list(events),
             "last_activity_at": events[-1]["timestamp"] if events else None}

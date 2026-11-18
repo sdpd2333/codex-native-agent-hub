@@ -210,7 +210,7 @@ def cleanup(token) -> dict:
             if not job or not ended_before(job, plan["cutoff"]) or job["finished_at"] != item["finished_at"]:
                 result["skipped_files"] += len(item["files"])
                 continue
-            _, unsafe = candidates(job_id)
+            files, unsafe = candidates(job_id)
             if unsafe:
                 result["skipped_files"] += len(item["files"])
                 continue
@@ -218,10 +218,10 @@ def cleanup(token) -> dict:
                 safe_stat(directory / "management.json")
             except FileNotFoundError:
                 pass
-            summary = progress.snapshot(job, include_result=False, complete_activity=True)["progress"]
-            # Save counters before any deletion, including if the process later stops mid-cleanup.
-            progress.update_management(job_id, activity_summary=summary, logs_cleaned_at=progress.now())
-        except (OSError, common.RelayError):
+            # A backup is not a deletion receipt. Readers use it if its log disappears,
+            # even after a restart between unlink and publishing the receipt.
+            progress.backup_activity(job, {path for path, _ in files})
+        except (OSError, ValueError, common.RelayError):
             result["errors"] += 1
             result["skipped_files"] += len(item["files"])
             continue
@@ -243,5 +243,11 @@ def cleanup(token) -> dict:
             except OSError:
                 result["errors"] += 1
                 result["skipped_files"] += 1
-        result["jobs_cleaned"] += bool(removed)
+        if removed:
+            result["jobs_cleaned"] += 1
+            try:
+                history.safe_job(job_id)  # The sidecar or a parent may have changed during deletion.
+                progress.update_management(job_id, logs_cleaned_at=progress.now())
+            except (OSError, common.RelayError):
+                result["errors"] += 1
     return result

@@ -119,6 +119,7 @@ function fixture() {
     },
     jobs: [job("a", "completed"), job("b")],
     results: {},
+    resultCursors: true,
     descriptions: {},
     calls: [],
     handlers: {},
@@ -428,7 +429,10 @@ function fixture() {
       if (!summary) throw new Error("任务不存在。");
       const chars = Array.from(state.results[payload.job_id] || ""),
         offset = payload.offset || 0,
-        max = payload.max_chars || 20000;
+        max = payload.max_chars || 20000,
+        next = offset + max < chars.length ? offset + max : null;
+      if (payload.cursor !== undefined && payload.cursor !== `page-${offset}`)
+        throw new Error("结果分页游标无效");
       return {
         ...clone(summary),
         ...(payload.include_description === false
@@ -442,7 +446,8 @@ function fixture() {
         result: chars.slice(offset, offset + max).join(""),
         offset,
         total_chars: chars.length,
-        next_offset: offset + max < chars.length ? offset + max : null,
+        next_offset: next,
+        ...(state.resultCursors && next !== null ? { next_cursor: `page-${next}` } : {}),
       };
     }
     if (action === "tasks") {

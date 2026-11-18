@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -84,13 +85,13 @@ def aged(job: dict, cutoff: datetime) -> bool:
         return False
 
 
-def auto_archive() -> int:
+def auto_archive(candidates: Iterable[dict] | None = None) -> int:
     saved = policy()
     if not saved["enabled"]:
         return 0
     cutoff = datetime.now(timezone.utc) - timedelta(days=saved["after_days"])
     count = 0
-    for candidate in records():
+    for candidate in (records() if candidates is None else candidates):
         job_id = candidate["job_id"]
         if not aged(candidate, cutoff) or not eligible(candidate, progress.load_management(job_id)):
             continue
@@ -152,12 +153,12 @@ def archive_legacy(token) -> dict:
                     result["skipped"] += 1
                     continue
                 job = progress.load_job(job_id, load_external_result=False)
-                if not job or job.get("conversation_id") or not eligible(job, progress.load_management(job_id)):
+                if not job or job.get("conversation_id") or not eligible(job, progress.load_management(job_id, strict=True)):
                     result["skipped"] += 1
                     continue
                 progress.update_management(job_id, archived_at=progress.now(), archive_reason="legacy")
                 result["archived"] += 1
-        except OSError:
+        except (OSError, common.RelayError):
             result["errors"] += 1
     return result
 
@@ -226,12 +227,12 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
     found, running, other_running = [], 0, 0
     statuses = {}
     archive_error = ""
+    merged = {job["job_id"]: job for job in records()}
     try:
-        auto_archive()
+        auto_archive(merged.values())
     except (common.RelayError, OSError):
         archive_error = "自动归档暂不可用，请到设置 → 存储与归档检查配置。"
     needle = search.strip().casefold()
-    merged = {job["job_id"]: job for job in records()}
     for job in live_jobs:
         merged[job["job_id"]] = job | {"_display_title": progress.display_title(job)}
     for job in merged.values():
@@ -252,7 +253,8 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
         found.append(job)
         statuses[job["job_id"]] = actual
     found.sort(key=lambda job: (activity_time(job), job["job_id"]), reverse=True)
-    recent_count = app_settings.values()["recent_completed_count"] if status == "all" and view != "archived" else 0
+    preferences = app_settings.values()
+    recent_count = preferences["recent_completed_count"] if status == "all" and view != "archived" else 0
     recent_ids = [job["job_id"] for job in found if statuses[job["job_id"]] == "completed"][:recent_count]
     recent_set = set(recent_ids)
     found.sort(key=lambda job: 0 if statuses[job["job_id"]] == "running"
@@ -261,7 +263,7 @@ def query(*, conversation: str = "", view: str = "all", search: str = "", status
     total = len(found)
     # Keep a valid last page after archive/filter changes.
     offset = min(offset, ((total - 1) // limit) * limit if total else 0)
-    return {"jobs": [progress.snapshot(job, include_result=False) for job in found[offset:offset + limit]],
+    return {"jobs": [progress.snapshot(job, include_result=False, preferences=preferences) for job in found[offset:offset + limit]],
             "total": total, "offset": offset, "limit": limit,
             "recent_completed_ids": recent_ids,
             "next_offset": offset + limit if offset + limit < total else None,
